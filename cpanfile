@@ -110,6 +110,7 @@ on 'test' => sub {
     requires 'Test::Output';
     requires 'Test::Pod';
     requires 'Test::Strict';
+    requires 'CommonMark';
     requires 'Test::Warnings', '>= 0.029';
 
 };

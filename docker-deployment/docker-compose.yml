@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  webui:
+    extends:
+      file: ./openqa-service.yml
+      service: openqa-base
+    ports:
+      - "9526:9526"
+    command: 
+      - ./script/openqa-webui-daemon
+    environment:
+      MODE: "webui"
+      MOJO_LISTEN: "http://0.0.0.0:9526"
+      # OPENQA_SCHEDULER_HOST: "scheduler"
+      # OPENQA_WEB_SOCKETS_HOST: "websockets"
+      MOJO_CLIENT_DEBUG: ${MOJO_CLIENT_DEBUG}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9526/login"]
+      interval: 5s
+      timeout: 2s
+      retries: 6
+      start_period: 5s
+
+  db:
+    image: postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: openqa
+      POSTGRES_USER: openqa
+      POSTGRES_DB: openqa
+    # volumes:
+    #   - ./workdir/db:/var/lib/postgresql/data:Z
+    # healthcheck:
+    #   test: ["CMD", "sh", "-c", "echo 'select * from api_keys;' | psql -U openqa -v 'ON_ERROR_STOP=1' openqa"]
+    #   interval: 10s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 5s

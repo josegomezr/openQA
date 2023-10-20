@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  openqa-base:
+    build:
+      context: ..
+      dockerfile: ./docker-deployment/Dockerfile
+      name: openqa-base
+    stdin_open: true
+    tty: true
+    environment:
+      - PGHOST=db
+      - PGPORT=5432
+      - PGUSER=scc
+      - PGPASSWORD=trumpisacyborg
+      - PGDATABASE=scc_${RAILS_ENV:-development}
+    volumes:
+      - ..:/openqa
