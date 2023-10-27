@@ -21,4 +21,3 @@ $ENV{MOJO_REACTOR} = 'Mojo::Reactor::Poll';
 
 set_listen_address(service_port('webui'));
 OpenQA::WebAPI::run;
-

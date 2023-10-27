@@ -134,6 +134,7 @@ sub _setup_websocket_connection ($self, $websocket_url = undef) {
                 });
         }
         $websocket_url = $self->url->clone;
+        $websocket_url->host('127.0.0.1:9527'); # TODO: UGLY af hack, websocket can't be configured.
         my %ws_scheme = (http => 'ws', https => 'wss');
         $websocket_url->scheme($ws_scheme{$websocket_url->scheme}) if $websocket_url->scheme =~ /http|https/;
         $websocket_url->path("ws/$worker_id");

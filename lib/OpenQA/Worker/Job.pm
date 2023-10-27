@@ -9,6 +9,7 @@ use OpenQA::Constants qw(DEFAULT_MAX_JOB_TIME DEFAULT_MAX_SETUP_TIME WORKER_COMM
   WORKER_SR_DONE WORKER_SR_DIED);
 use OpenQA::Jobs::Constants;
 use OpenQA::Worker::Engines::isotovideo;
+use OpenQA::Worker::Engines::IsotovideoNextGen;
 use OpenQA::Worker::Isotovideo::Client;
 use OpenQA::Log qw(log_error log_warning log_debug log_info redact_settings_in_file);
 use OpenQA::Utils qw(find_video_files usleep_backoff);
@@ -275,6 +276,11 @@ sub start {
 
     # start isotovideo
     # FIXME: isotovideo.pm could be a class inheriting from Job.pm or simply be merged
+    print "isotovideo-ng: INIT\n";
+    my $isotovideo = OpenQA::Worker::Engines::IsotovideoNextGen->new();
+    print "isotovideo-ng: PREPARE\n";
+    return $isotovideo->prepare();
+
     return OpenQA::Worker::Engines::isotovideo::engine_workit($self,
         sub ($engine) { $self->_handle_engine_startup($engine, $max_job_time) });
 }

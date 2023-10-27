@@ -77,7 +77,7 @@ use constant {
 use constant MAX_TIMER => 300;
 
 # Time verification to use with the "worker_timeout" configuration.
-use constant MIN_TIMER => 60;
+use constant MIN_TIMER => 0;
 
 # The max. time a job is allowed to run by default before the worker stops it.
 use constant DEFAULT_MAX_JOB_TIME => 2 * ONE_HOUR;

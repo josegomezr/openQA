@@ -7,6 +7,7 @@ use Mojo::Base -strict, -signatures;
 
 use parent 'DBIx::Class::Schema';
 
+use Data::Dumper;
 use DBIx::Class::DeploymentHandler;
 use Config::IniFiles;
 use Cwd 'abs_path';
@@ -41,6 +42,7 @@ sub connect_db (%args) {
         die 'Could not find database section \'' . $mode . '\' in ' . $database_file unless $ini{$mode};
         $SINGLETON = __PACKAGE__->connect($ini{$mode});
     }
+
     deploy $SINGLETON if $check_deploy;
     return $SINGLETON;
 }
@@ -60,7 +62,7 @@ sub deploy ($self, $force_overwrite = 0) {
     # lock config file to ensure only one thing will deploy/upgrade DB at once
     # we use a file in prjdir/db as the lock file as the install process and
     # packages make this directory writeable by openQA user by default
-    my $dblockfile = catfile(prjdir(), 'db', 'db.lock');
+    my $dblockfile = catfile(prjdir(), ,'..', 'db.lock');
     my $dblock;
 
     # LOCK_EX works most reliably if the file is open with write intent

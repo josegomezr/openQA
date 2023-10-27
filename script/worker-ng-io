@@ -1,0 +1,167 @@
+#!/usr/bin/env perl
+# Copyright 2015-2021 SUSE LLC
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::RealBin/../lib";
+use Carp::Always;
+
+# Lowercase command name
+use Mojo::Base -signatures;
+use Mojo::IOLoop;
+use Mojo::UserAgent;
+use Mojo::Promise;
+use Data::Dumper;
+use Mojo::JSON;
+
+# globals
+my $ua = Mojo::UserAgent->new;
+my $ws_connection = undef;
+
+sub main {
+    worker_boot();
+
+    Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
+}
+
+sub worker_boot {
+    worker_register_rest()
+        ->then(sub {
+            return worker_register_ws()
+                ->then(sub {
+                    say 'all good: waiting for commands';
+                })
+                ->catch(sub {
+                    my ($err) = @_;
+                    say 'fail worker_register_ws';
+                    worker_cleanup();
+                });
+        })
+        ->catch(sub {
+            my ($err) = @_;
+            say 'fail worker_register_rest' . $err;
+            worker_cleanup();
+        })
+        ->wait();
+}
+
+sub worker_register_rest {
+    my $sub_name = (caller(0))[3];
+
+    my $promise = Mojo::Promise->new();
+
+    printf "%s: Registering worker via rest api\n", $sub_name;
+
+    Mojo::IOLoop->next_tick(sub {
+        # sleep 1;
+        printf "%s: next-tick - resolve\n", $sub_name;
+        $promise->resolve('success');
+        # printf "%s: next-tick - reject\n", $sub_name;
+        # $promise->reject('fail');
+    });
+
+    return $promise;
+}
+
+sub worker_register_ws {
+    my $sub_name = (caller(0))[3];
+    my $promise = Mojo::Promise->new();
+
+    printf "%s: Registering worker via ws api\n", $sub_name;
+
+    my $url = 'ws://127.0.0.1:3000/';
+
+    $ua->websocket($url => {} => sub {
+        my ($ua, $tx) = @_;
+
+        if (!$tx->is_websocket) {
+            say 'WebSocket handshake failed!';
+            $promise->reject('bad hanshake');
+            return;
+        }
+
+        $ws_connection = $tx;
+
+        $promise->resolve('success');
+
+        $tx->on(finish => sub {
+            my ($tx, $code, $reason) = @_;
+            say "WebSocket closed with status $code."
+        });
+
+        $tx->on(json => sub {
+            my ($tx, $json) = @_;
+            say "json RECEIVED: " . Mojo::JSON::encode_json($json);
+
+            if ($json->{command} eq 'do-work') {
+                worker_do_work();
+            }
+
+            if ($json->{command} eq 'close') {
+                worker_cleanup();
+            }
+        });
+
+        my $msg = {
+            command => 'hello'
+        };
+
+        $tx->send({json => $msg});
+    });
+    return $promise;
+}
+
+sub worker_do_work {
+    say "Start subprocess with work";
+    my $final_work_result = '';
+
+    Mojo::IOLoop->subprocess->run_p(sub {
+        my ($subprocess) = @_;
+        say "DOING WORK!";
+        
+        sleep 3;
+
+        say "DONE WORK!";
+
+        return 'results here';
+        })
+    ->then(sub {
+        my (@results) = @_;
+        say "I got!";
+        map { say $_ } @results;
+
+        $final_work_result = pop @results;
+    })->catch(sub {
+        my ($err) = @_;
+        say "Subprocess error: $err";
+    })->finally(sub {
+        say "Finished job with result: $final_work_result";
+    });
+}
+
+sub worker_cleanup {
+    my $sub_name = (caller(0))[3];
+
+    printf "%s: WORKER CLEANUP\n", $sub_name;
+
+    if ($ws_connection) {
+        $ws_connection->finish();
+        $ws_connection = undef;
+    }
+
+    Mojo::IOLoop->stop;
+}
+
+sub handle_exit_signal { 
+    my ($signal) = @_;
+    say "caught: $signal";
+    worker_cleanup();
+}
+
+$SIG{HUP} = \*handle_exit_signal;
+$SIG{TERM} = \*handle_exit_signal;
+$SIG{INT} = \*handle_exit_signal;
+
+main(@ARGV);
