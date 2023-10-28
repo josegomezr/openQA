@@ -172,7 +172,7 @@ sub _message {
                 $worker->seen({error => $current_worker_error});
 
                 # Tell the worker that we saw it (used for tests and debugging)
-                $tx->send({json => {type => 'info', seen => 1}});
+                $tx->send({json => {type => 'info', seen => 1, from => $current_worker_status}});
             }
             catch {
                 log_error("Failed updating seen and error status of worker $worker_id: $_");    # uncoverable statement

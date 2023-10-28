@@ -12,9 +12,7 @@ use OpenQA::WorkerNg ();
 my $worker = OpenQA::WorkerNg->new();
 
 $worker->configure_signal_handlers();
-$worker->register();
-$worker->emit('boot');
-
+$worker->run();
 
 Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
 

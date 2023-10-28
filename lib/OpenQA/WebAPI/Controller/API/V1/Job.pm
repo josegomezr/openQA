@@ -693,7 +693,7 @@ sub create_artefact ($self) {
 
         if ($custom) {
             my ($error, $fname, $type, $last)
-              = $job->create_asset_2($validation->param('file'), $scope, $self->param('local'));
+              = $job->create_asset_upload_simple($validation->param('file'), $scope, $self->param('local'));
             
             if ($error) {
                 # return 500 even if most probably it is an error on client side so the worker can keep retrying if it was

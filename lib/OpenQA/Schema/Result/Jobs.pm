@@ -1323,7 +1323,7 @@ sub create_artefact ($self, $asset, $ulog) {
     log_trace("Created artefact: $target");
 }
 
-sub create_asset_2 ($self, $asset, $scope, $local = undef) {
+sub create_asset_upload_simple ($self, $asset, $scope, $local = undef) {
     my $fname = $asset->filename;
 
     # FIXME: pass as parameter to avoid guessing

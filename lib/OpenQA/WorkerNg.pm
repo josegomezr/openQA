@@ -10,6 +10,7 @@ use Hash::Merge ();
 use Mojo::JSON ();
 
 use OpenQA::Constants qw(WEBSOCKET_API_VERSION WORKER_SR_DONE);
+use OpenQA::WorkerNg::Helper ();
 
 # new, registering, establishing_ws, connected, failed, disabled, quit
 has exit_status => sub { return OpenQA::WorkerNg::Constants::EXIT_SUCCESS };
@@ -51,22 +52,32 @@ has 'current_job';
 has 'websocket_connection';
 has 'retry_delay' => sub { 5 };
 
-my $callbacks = 0;
-
 sub new {
     my ($class, @attrs) = @_;
     my $self = $class->SUPER::new(@attrs);
     return $self;
 }
 
-my $counter = 0;
+sub run {
+    my ($self) = @_;
+
+    say "Worker [log]: Starting Worker";
+    say "Worker [log]: Connecting to OpenQA Instance";
+    say sprintf("Worker [log]: REST API %s", OpenQA::WorkerNg::Helper::host_and_proto_of($self->api_url));
+    say sprintf("Worker [log]: WS API %s", OpenQA::WorkerNg::Helper::host_and_proto_of($self->websocket_url));
+
+    return undef unless $self->register_rest_api();
+    say "Worker [log]: Identified as Worker-ID: " . $self->worker_id;
+    return undef unless $self->start_ws_conn();
+
+    $self->configure_callbacks();
+}
 
 sub configure_callbacks {
     my ($self) = @_;
 
-    return undef if $callbacks;
-    $callbacks = 1;
-
+    # Worker Status State Machine
+    #
     $self->on(status_change => sub {
         my ($self, $status, $extra_context, $cb) = @_;
         say sprintf("Worker [log]: transition from '%s' to '%s'", $self->status, $status);
@@ -76,9 +87,11 @@ sub configure_callbacks {
     $self->on(openqa_grab_job => sub {
         my ($self, $job_info) = @_;
 
-        # $self->on_reject_job($job_info);
+        if ($self->status eq OpenQA::WorkerNg::Constants::WS_STATUS_FREE){
+            return $self->on_grab_job($job_info);
+        }
 
-        $self->on_grab_job($job_info);
+        return $self->on_reject_job($job_info);
     });
 
     $self->on(openqa_info => sub {
@@ -147,7 +160,7 @@ sub send_via_rest {
     $method = uc($method);
 
     # sleep 5;
-    say "  API: Worker -> openQA: $method $url " . Mojo::JSON::encode_json($body);
+    say "  API: Worker -> openQA: $method /$path " . Mojo::JSON::encode_json($body);
     my $tx = $self->client->build_tx($method, $url, $headers, %$body);
     $self->client->start($tx);
     my $res = $tx->res->body;
@@ -172,8 +185,8 @@ sub on_worker_status_change {
         sub {
             $cb->($self) if $cb;
 
-            if ($status eq 'stopping') {
-                # $self->send_job_results();
+            if ($status eq 'stopped') {
+                $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_FREE);
             }
 
             if ($status eq 'quit' || $status eq 'dead') {
@@ -300,7 +313,7 @@ sub send_job_results {
     $self->current_job(undef);
 
     $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPED, {
-        ok => 1,
+        ok => 1
     });
 }
 
@@ -318,13 +331,6 @@ sub compute_capabilities {
     };
 
     return $capabilities;
-}
-
-sub register {
-    my $self = shift;
-    return undef unless $self->register_rest_api();
-    return undef unless $self->start_ws_conn();
-    return $self;
 }
 
 sub register_rest_api {
@@ -359,7 +365,7 @@ sub handle_worker_register_error {
     my $error_message;
     $error_message = $json_res->{error} if ref($json_res) eq 'HASH';
     $error_message //= $tx->res->body || $error->{message};
-    $error_message = "Failed to register at ".$self->api_url." - $error_class: $error_message";
+    $error_message = "Failed to register at " . OpenQA::WorkerNg::Helper::host_and_proto_of($self->api_url) . " - $error_class: $error_message";
     
     my $status = (defined $error_code && $error_code =~ /^4\d\d$/ ? 'disabled' : 'failed');
 
@@ -382,7 +388,7 @@ sub start_ws_conn {
         $self->websocket_connection(undef);
     }
 
-    say "Worker [log]: Initiating Websockets connection to $url";
+    say "Worker [log]: Initiating Websockets connection to: ", OpenQA::WorkerNg::Helper::host_and_proto_of($url);
     my $ua = $self->client;
     
     $ua->max_connections(0)
@@ -399,9 +405,11 @@ sub start_ws_conn {
         }
 
         $self->websocket_connection($tx);
-        $self->configure_callbacks();
 
-        $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_CONNECTED);
+        $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_CONNECTED, {}, sub {
+            # Signal that we're ready
+            $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_FREE);
+        });
 
         $self->websocket_connection->on(finish => sub {
             my ($ws, $code, $reason) = @_;
@@ -416,9 +424,9 @@ sub start_ws_conn {
 
         $self->websocket_connection->on(json => sub {
             my ($tx, $json) = @_;
-            # sleep 5;
-            say "  WSS: OpenQA -> Worker: " . Mojo::JSON::encode_json($json);
-            my $event_name = "openqa_" . $json->{type};
+            my $message = $json->{type};
+            say "  WSS: OpenQA -- [$message] -> Worker: " . Mojo::JSON::encode_json($json);
+            my $event_name = "openqa_" . $message;
             $self->emit( $event_name => $json);
         });
     });
