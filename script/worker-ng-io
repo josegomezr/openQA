@@ -21,7 +21,8 @@ my $ua = Mojo::UserAgent->new;
 my $ws_connection = undef;
 
 sub main {
-    worker_boot();
+    my $worker = OpenQA::WorkerNg->new();
+    my $worker->boot();
 
     Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
 }

@@ -1323,6 +1323,34 @@ sub create_artefact ($self, $asset, $ulog) {
     log_trace("Created artefact: $target");
 }
 
+sub create_asset_2 ($self, $asset, $scope, $local = undef) {
+    my $fname = $asset->filename;
+
+    # FIXME: pass as parameter to avoid guessing
+    my $type;
+    $type = 'iso' if $fname =~ /\.iso$/;
+    $type = 'hdd' if $fname =~ /\.(?:qcow2|raw|vhd|vhdx)$/;
+    $type //= 'other';
+
+    my $job_id = sprintf "%08d", $self->id;
+    $fname = "$job_id-$fname" if $scope ne 'public';
+
+    my $assetdir = assetdir();
+    my $fpath = path($assetdir, $type);
+
+    my $final_file = path($fpath, $fname);
+
+    # XXX : Moving this to subprocess/promises won't help much
+    # As calculating sha256 over >2GB file is pretty expensive
+    # IF we are receiving simultaneously uploads
+    my $last = 1;
+
+    $asset->move_to($final_file);
+    chmod 0644, $final_file;
+
+    return 0, $fname, $type, $last;
+}
+
 sub create_asset ($self, $asset, $scope, $local = undef) {
     my $fname = $asset->filename;
 
@@ -1360,7 +1388,6 @@ sub create_asset ($self, $asset, $scope, $local = undef) {
     # As calculating sha256 over >2GB file is pretty expensive
     # IF we are receiving simultaneously uploads
     my $last = 0;
-
     local $@;
     eval {
         my $chunk = OpenQA::File->deserialize($asset->slurp);

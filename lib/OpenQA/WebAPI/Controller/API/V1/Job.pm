@@ -689,6 +689,23 @@ sub create_artefact ($self) {
         return $self->render(json => {error => 'Unable to parse extra test'}, status => 400);
     }
     elsif (my $scope = $self->param('asset')) {
+        my $custom = $self->req->headers->header('X-Normal-Upload');
+
+        if ($custom) {
+            my ($error, $fname, $type, $last)
+              = $job->create_asset_2($validation->param('file'), $scope, $self->param('local'));
+            
+            if ($error) {
+                # return 500 even if most probably it is an error on client side so the worker can keep retrying if it was
+                # caused by network failures
+                $self->app->log->debug($error);
+                return $self->render(json => {error => "Failed receiving asset: $error"}, status => 500);
+            }
+            my $assets = $schema->resultset('Assets');
+            $assets->register($type, $fname, {scope => $scope, created_by => $job, refresh_size => 1}) if $last;
+            return $self->render(json => {status => 'ok'});
+        }
+
         my ($error, $fname, $type, $last)
           = $job->create_asset($validation->param('file'), $scope, $self->param('local'));
         if ($error) {
