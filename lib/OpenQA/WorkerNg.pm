@@ -3,14 +3,13 @@
 
 package OpenQA::WorkerNg;
 use Mojo::Base -base, 'Mojo::EventEmitter', -strict, -signatures;
-use OpenQA::WorkerNg::Constants;
-use OpenQA::Client;
-use Data::Dumper;
-use Hash::Merge;
-use Mojo::JSON;
+use OpenQA::WorkerNg::Constants ();
+use OpenQA::Client ();
+use Data::Dumper qw(Dumper);
+use Hash::Merge ();
+use Mojo::JSON ();
 
-use OpenQA::Constants qw(WEBSOCKET_API_VERSION WORKER_COMMAND_QUIT
-WORKER_SR_BROKEN WORKER_SR_DONE WORKER_SR_DIED WORKER_SR_FINISH_OFF);
+use OpenQA::Constants qw(WEBSOCKET_API_VERSION WORKER_SR_DONE);
 
 # new, registering, establishing_ws, connected, failed, disabled, quit
 has exit_status => sub { return OpenQA::WorkerNg::Constants::EXIT_SUCCESS };
@@ -50,6 +49,9 @@ has client => sub {
 
 has 'current_job';
 has 'websocket_connection';
+has 'retry_delay' => sub { 5 };
+
+my $callbacks = 0;
 
 sub new {
     my ($class, @attrs) = @_;
@@ -57,91 +59,127 @@ sub new {
     return $self;
 }
 
+my $counter = 0;
+
 sub configure_callbacks {
     my ($self) = @_;
 
-    # 
+    return undef if $callbacks;
+    $callbacks = 1;
+
     $self->on(status_change => sub {
-        my ($self, $status, $extra_context) = @_;
-        $self->on_worker_status_change($status, $extra_context);
+        my ($self, $status, $extra_context, $cb) = @_;
+        say sprintf("Worker [log]: transition from '%s' to '%s'", $self->status, $status);
+        $self->on_worker_status_change($status, $extra_context, $cb);
     });
 
-    $self->on(grab_job => sub {
+    $self->on(openqa_grab_job => sub {
         my ($self, $job_info) = @_;
+
+        # $self->on_reject_job($job_info);
+
         $self->on_grab_job($job_info);
     });
 
-    $self->on(info => sub {
+    $self->on(openqa_info => sub {
         my ($self, $job_info) = @_;
         say "     worker-info: " . Mojo::JSON::encode_json($job_info);
     });
 }
 
+sub on_reject_job {
+    my ($self, $job_info) = @_;
+    my $message = { job_ids => [$job_info->{'job'}->{'id'}] };
+    $self->send_via_ws(
+        OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_REJECT_JOBS,
+        $message,
+        sub {
+            my($self) = @_;
+            say '     job has been rejected';
+
+            $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_FREE);
+        });
+}
+
 sub on_grab_job {
     my ($self, $job_info) = @_;
 
-    $self->emit(status_change => 'accepting');
+    $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_ACCEPTING);
     $self->current_job($job_info->{'job'});
 
-    my $message = {type => 'accepted', jobid => $job_info->{'id'}};
+    my $message = { jobid => $job_info->{'job'}->{'id'} };
 
-    $self->send_via_ws($message, sub {
-        my($self) = @_;
-        say '     job has been accepted';
-        $self->schedule_work();
-    })
+    $self->send_via_ws(
+        OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_ACCEPT_JOB,
+        $message,
+        sub {
+            my($self) = @_;
+            say '     job has been accepted';
+            $self->schedule_work();
+        });
 }
 
 sub send_via_ws {
     # use Mojo::JSON 'encode_json';
-    my ($self, $json, $cb) = @_;
+    my ($self, $type, $json, $cb) = @_;
 
     return undef unless $self->websocket_connection;
-    say "WSS: Worker -> openQA: " . Mojo::JSON::encode_json($json);
+    # sleep 5;
+    say "  WSS: Worker -- [$type] -> openQA: " . Mojo::JSON::encode_json($json);
+
+    my $merger = Hash::Merge->new('LEFT_PRECEDENT');
+    $json = $merger->merge($json, {
+        type => $type
+    });
 
     $self->websocket_connection->send({json => $json}, sub {
-        say "WSS: Worker <- openQA: ACK";
-        $cb->($self);
+        say "  WSS: Worker <- [$type] - openQA: ACK";
+        $cb->($self) if $cb;
     })
 }
 
 sub send_via_rest {
-    my $self = shift;
-    my ($method, $path, $headers, $body) = @_;
+    my ($self, $method, $path, $headers, $body) = @_;
 
     my $url = $self->api_url->clone->path($path);
     $body = $headers and $headers = {} unless $body;
 
     $method = uc($method);
 
-    say "API: Worker -> openQA: $method $url " . Mojo::JSON::encode_json($body);
+    # sleep 5;
+    say "  API: Worker -> openQA: $method $url " . Mojo::JSON::encode_json($body);
     my $tx = $self->client->build_tx($method, $url, $headers, %$body);
     $self->client->start($tx);
     my $res = $tx->res->body;
-    say "API: Worker <- openQA: " . $res;
+    say "  API: Worker <- openQA: " . $res;
     
     return $tx;
 }
 
 sub on_worker_status_change {
-    my ($self, $status, $extra_context) = @_;
+    my ($self, $status, $extra_context, $cb) = @_;
     $self->status($status);
 
-    my $message = { type => 'worker_status', status => $status, };
+    my $message = { status => $status, };
 
     my $merger = Hash::Merge->new('LEFT_PRECEDENT');
 
     $message = $merger->merge($message, $extra_context);
 
-    $self->send_via_ws($message, sub {
-        if ($status eq 'stopping') {
-            $self->complete_job();
-        }
+    $self->send_via_ws(
+        OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_WORKER_STATUS,
+        $message,
+        sub {
+            $cb->($self) if $cb;
 
-        if ($status eq 'quit' || $status eq 'dead') {
-            $self->on_worker_stop();
-        }
-    });
+            if ($status eq 'stopping') {
+                # $self->send_job_results();
+            }
+
+            if ($status eq 'quit' || $status eq 'dead') {
+                $self->on_worker_stop();
+            }
+        });
 }
 
 sub on_worker_stop {
@@ -154,48 +192,96 @@ sub on_worker_stop {
 sub schedule_work {
     my ($self) = @_;
     my $job_id = $self->current_job->{id};
-    my $final_work_result;
 
-    my $url = "jobs/$job_id/status";
-    my $params = {status => { worker_id => $self->worker_id }};
+    say "Worker [log]: Signal openQA we're taking job $job_id";
+    {
+        my $url = "jobs/$job_id/status";
+        my $params = {status => { worker_id => $self->worker_id }};
+        $self->send_via_rest(POST => $url, {json => $params});
+    }
 
-    $self->send_via_rest(POST => $url, {json => $params});
+    say "Worker [log]: Signal openQA we're working";
+    {
+        $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_WORKING);
+    }
+    
+    say "Worker [log]: [SUBPROCESS-PRE] BEGIN WORK (FORKING) " . $$;
 
-    Mojo::IOLoop->subprocess->run_p(sub {
+    my $subprocess = Mojo::IOLoop->subprocess->run(sub {
         my ($subprocess) = @_;
-        map { say $_ } @_;
+        my $pid = $subprocess->pid;
+        say "Worker [log]: [SUBPROCESS-CHILD]: PID $pid | \$\$: " . $$;
 
-        say "------- DOING WORK!";
+        # my $stream = Mojo::IOLoop::Stream->new($handle);
+        # $stream->on(read => sub ($stream, $bytes) {...});
+        # $stream->on(close => sub ($stream) {...});
+        # $stream->on(error => sub ($stream, $err) {...});
+
+        map { $subprocess->progress("log line: $_") and sleep 1; } (1, 2, 3, 4, 5, 6);
+
+        sleep 30;
+        say "Worker [log]: [SUBPROCESS-CHILD]: PID $pid | \$\$: " . $$ . " ---- STOP ----";
         
-        sleep 3;
+    }, sub {
+        my ($subprocess, $err, @results) = @_;
+        my $pid = $subprocess->pid;
 
-        say "------- DONE WORK!";
+        say "Worker [log]: [SUBPROCESS-CHILD-END] [PARENT]  $pid | \$\$: " . $$;
 
-        return 'results here';
-    })
-    ->then(sub {
-        my (@results) = @_;
-        say "------- I got!";
-        map { say $_ } @results;
-
-        $final_work_result = pop @results;
-    })->catch(sub {
-        my ($err) = @_;
-        say "------- Subprocess error: $err";
-    })->finally(sub {
-        say "======= Finished job with result: $final_work_result";
-
-        open(my $fh, '>>', '/tmp/result.txt') or die $!;
-        say $fh $final_work_result;
-        close $fh;
-
-        $self->emit(status_change => 'stopping', {
+        $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPING, {
             reason => 'done'
+        }, sub {
+            # Upload job results
+            $self->send_job_results();
         });
+    });
+
+    $subprocess->on(spawn => sub {
+        my ($subprocess) = @_;
+        my $pid = $subprocess->pid;
+        say "Worker [log]: [SUBPROCESS-SPAWN]: Performing work in process $pid | \$\$: " . $$;
+    });
+
+    $subprocess->on(progress => sub {
+        my ($subprocess, @data) = @_;
+        my $pid = $subprocess->pid;
+        say "Worker [log]: [SUBPROCESS-PROGRESS]: $pid | \$\$: ", $$, " ", @data;
+    });
+
+    $subprocess->on(cleanup => sub {
+        my ($subprocess) = @_;
+        my $pid = $subprocess->pid;
+        say "Worker [log]: [SUBPROCESS-CLEANUP] | PID: $pid \$\$: ", $$;
     });
 }
 
-sub complete_job {
+sub upload_artifacts {
+    my ($self) = @_;
+    
+    my $job_id = $self->current_job->{'id'};
+    my $asset = Mojo::Asset::File->new(path => '/tmp/result.txt');
+    $asset->slurp;
+
+    $self->send_via_rest(POST => "jobs/$job_id/artefact", {"X-Normal-Upload" => 1} ,{ form => { 
+        asset => 'public',
+        file => { file => $asset } }, 
+    });
+}
+
+sub save_job_results {
+    my ($self) = @_;
+    
+    my $job_id = $self->current_job->{'id'};
+    my $asset = Mojo::Asset::File->new(path => '/tmp/result.txt');
+    $asset->slurp;
+
+    $self->send_via_rest(POST => "jobs/$job_id/artefact", {"X-Normal-Upload" => 1} ,{ form => { 
+        asset => 'public',
+        file => { file => $asset } }, 
+    });
+}
+
+sub send_job_results {
     my ($self) = @_;
 
     my $params = {
@@ -205,21 +291,15 @@ sub complete_job {
 
     # pass the reason if it is an additional specification of the result
     my $job_id = $self->current_job->{'id'};
+
+    $self->upload_artifacts();
+
     $params->{worker_id} = $self->worker_id;
-
-    my $asset = Mojo::Asset::File->new(path => '/tmp/result.txt');
-    $asset->slurp;
-
-    $self->send_via_rest(POST => "jobs/$job_id/artefact", {"X-Normal-Upload" => 1} ,{ form => { 
-        asset => 'public',
-        file => { file => $asset } }, 
-    });
-
     $self->send_via_rest(POST => "jobs/$job_id/set_done", { form => $params });
 
     $self->current_job(undef);
 
-    $self->emit(status_change => 'stopped', {
+    $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPED, {
         ok => 1,
     });
 }
@@ -296,15 +376,23 @@ sub start_ws_conn {
     my $self = shift;
     my $url = $self->websocket_url;
 
-    say "Initiating Websockets connection to $url";
+    if ($self->websocket_connection) {
+        say "Worker [log]: Disconnecting current ws";
+        $self->websocket_connection->finish();
+        $self->websocket_connection(undef);
+    }
+
+    say "Worker [log]: Initiating Websockets connection to $url";
     my $ua = $self->client;
     
     $ua->max_connections(0)
         ->max_redirects(3);
 
-    $ua->websocket($url, {'Sec-WebSocket-Extensions' => 'permessage-deflate'} => sub ($ua, $tx) {
+    $ua->websocket($url, {'Sec-WebSocket-Extensions' => 'permessage-deflate'} => sub {
+        my ($ua, $tx) = @_;
+
         if(!$tx->is_websocket){
-            say 'WebSocket handshake failed!';
+            say 'Worker [log]: WebSocket handshake failed!';
             $self->exit_status(OpenQA::WorkerNg::Constants::EXIT_ERR_WS);
             $self->cleanup();
             return;
@@ -313,11 +401,25 @@ sub start_ws_conn {
         $self->websocket_connection($tx);
         $self->configure_callbacks();
 
-        $self->emit(status_change => 'connected');
+        $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_CONNECTED);
 
-        $self->websocket_connection->on(json => sub ($tx, $json) {
-            say "WSS: OpenQA -> Worker: " . Mojo::JSON::encode_json($json);
-            $self->emit($json->{type} => $json);
+        $self->websocket_connection->on(finish => sub {
+            my ($ws, $code, $reason) = @_;
+
+            say "  WSS: closed connection with code: $code";
+            # say "  WSS: retrying in " . $self->retry_delay;
+            
+            # Mojo::IOLoop->timer($self->retry_delay, sub {
+            #     $self->start_ws_conn();
+            # });
+        });
+
+        $self->websocket_connection->on(json => sub {
+            my ($tx, $json) = @_;
+            # sleep 5;
+            say "  WSS: OpenQA -> Worker: " . Mojo::JSON::encode_json($json);
+            my $event_name = "openqa_" . $json->{type};
+            $self->emit( $event_name => $json);
         });
     });
 }
@@ -328,11 +430,14 @@ sub cleanup {
 
     return unless $self->websocket_connection;
 
-    $self->send_via_ws({type => 'quit'}, sub {
-        $self->websocket_connection->finish();
-        $self->websocket_connection(undef);
-        Mojo::IOLoop->stop;
-    });
+    $self->send_via_ws(
+        OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_QUIT,
+        {},
+        sub {
+            $self->websocket_connection->finish() if $self->websocket_connection;
+            $self->websocket_connection(undef);
+            Mojo::IOLoop->stop;
+        });
 }
 
 sub configure_signal_handlers {

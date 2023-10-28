@@ -4,10 +4,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 use Mojo::Base -strict, -signatures;
-use Mojo::IOLoop;
-use FindBin;
+use Mojo::IOLoop ();
+use FindBin ();
 use lib "$FindBin::RealBin/../lib";
-use OpenQA::WorkerNg;
+use OpenQA::WorkerNg ();
 
 my $worker = OpenQA::WorkerNg->new();
 

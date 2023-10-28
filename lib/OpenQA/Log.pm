@@ -67,6 +67,7 @@ sub _current_log_level () {
     my $app = OpenQA::App->singleton;
     return 0 unless defined $app && $app->can('log');
     return 0 unless my $log = $app->log;
+    $log->level('trace');
     return $log->can('level') && $log->level;
 }
 
