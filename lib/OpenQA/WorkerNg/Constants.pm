@@ -15,13 +15,20 @@ use constant {
     WS_WORKER_COMMAND_QUIT => 'quit',
     WS_WORKER_COMMAND_REJECT_JOBS => 'rejected',
     WS_WORKER_COMMAND_ACCEPT_JOB => 'accepted',
+    WS_OPENQA_COMMAND_LIVELOG_PUSH => 'livelog_push',
     WS_WORKER_COMMAND_WORKER_STATUS => 'worker_status',
+
+    # Websocket messages from openQA -> Worker
+    WS_OPENQA_COMMAND => 'openqa_command',
 
     # Websocket messages from openQA -> Worker
     WS_OPENQA_COMMAND_GRAB_JOB => 'grab_job',
     WS_OPENQA_COMMAND_INFO => 'info',
+    WS_OPENQA_COMMAND_LIVELOG_STOP => 'livelog_stop',
+    WS_OPENQA_COMMAND_LIVELOG_START => 'livelog_start',
 
     # Websocket worker status
+    WS_STATUS_INIT => 'init',
     WS_STATUS_CONNECTED => 'connected',
     WS_STATUS_FREE => 'free',
     WS_STATUS_ACCEPTING => 'accepting',
@@ -33,8 +40,9 @@ use constant {
     WS_STATUS_FAILED => 'failed',
     WS_STATUS_BROKEN => 'broken',
 
-
     JOB_STATUS_SETUP => 'setup',
+
+    WORKER_ENGINE_RPC_LIVE_LOG => 'engine_rpc_livelog',
 };
 
 1;
