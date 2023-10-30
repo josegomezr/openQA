@@ -93,6 +93,9 @@ sub streamtext ($self, $file_name, $start_hook = undef, $close_hook = undef) {
     # if the open fails, continue, well check later
     my $log;
     my ($ino, $size);
+
+    $self->write("data: " . encode_json(["Streaming the last 10k bytes from $logfile"]) . "\n\n");
+
     if (open($log, '<', $logfile)) {
         # Send the last 10KB of data from the logfile, so that
         # the client sees some data immediately
@@ -252,7 +255,7 @@ sub streaming ($self) {
     }
     catch {
         my $error = "Unable to ask worker $worker_id to start providing livestream for $job_id: $_";
-        $self->write("data: $error\n\n", $close_connection);
+        $self->write(sprintf("data: %s\n\n", encode_json($error)), $close_connection);
         log_error($error);
     };
 }
