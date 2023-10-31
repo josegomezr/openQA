@@ -1,0 +1,61 @@
+@startuml
+Init : Worker is invoked
+Init : ./script/worker-entry-point
+
+[*] --> Init: Worker Entrypoint
+state Init {
+    configure   : Fetch system information and configurations
+    configure   : (CPU Data, Hostname, Connection & Authentication)
+
+    [*] --> configure: boot
+
+    configure --> [*]: [GO: Connecting]
+}
+
+Connecting : This state is referred to in the code
+Connecting : as "Register" & "Registering"
+
+Init --> Connecting
+Connecting --> Idle: Connected
+Idle --> Running: Perform Job
+
+State Connecting {
+    rest_register : Register to OpenQA Via Rest API
+    rest_register : To get a Worker ID
+    ws_register   : Stablish a WS Connection with OpenQA
+    ws_register   : Websocket Service (Worker Coordinator)
+
+    [*] --> rest_register: register
+    rest_register --> ws_register: Successful Auth
+
+    rest_register --> [*]: failed to register [rest]
+    ws_register --> [*]: failed to register [ws]
+
+    ws_register --> [*]: connection stablished [GO: IDLE]
+}
+
+state Idle {
+    [*] --> free
+
+    state if_state <<choice>>
+    if_state : TEXT
+
+    free : Worker is Waiting for Jobs
+
+    free --> if_state: accepting
+    if_state --> [*]: accept job [GO: WORKING]
+    if_state --> free : reject job [GO: IDLE]    
+}
+
+state Running {
+    [*] --> setup: preparing for job execution
+
+    setup --> running: start test job
+    running --> stopping: done
+    stopping --> stopped: job results sent
+    stopped --> [*]: [GO: IDLE]
+
+    setup --> stopping: failed setup
+}
+
+@enduml
