@@ -12,8 +12,17 @@ use Mojo::Log ();
 
 use OpenQA::Constants qw(WORKER_SR_DONE);
 use OpenQA::WorkerNg::Helper ();
+use OpenQA::Utils qw(prjdir);
+use Mojo::File;
+use Fcntl ();
+
+use constant {
+    OS_AUTOINST_LOG => 'os-autoinst.txt',
+    MAX_LIVELOG_CHUNK => 10_000,
+};
 
 # new, registering, establishing_ws, connected, failed, disabled, quit
+has instance_number => 1;
 has exit_status => sub { return OpenQA::WorkerNg::Constants::EXIT_SUCCESS };
 has livelog_status => sub { 0 };
 
@@ -41,6 +50,10 @@ has client => sub {
     );
 };
 
+
+has job_pool_dir => undef;
+has job_os_autoinst_file => undef;
+
 has worker_id => undef;
 has current_job => undef;
 has websocket_connection => undef;
@@ -58,27 +71,68 @@ sub run {
     $self->logger->info("Connecting to OpenQA Instance");
     $self->logger->info(sprintf("REST+WS API %s", OpenQA::WorkerNg::Helper::host_and_proto_of($self->api_url)));
 
+    $self->configure_callbacks();
+
     return undef unless $self->authenticate();
     $self->logger->trace("Identified as Worker-ID: " . $self->worker_id);
     return undef unless $self->connect_to_broker();
 
-    $self->configure_callbacks();
 }
 
-sub start_livelog {
+sub worker_start_livelog {
     my ($self, $job_info) = @_;
     my $job_id = $job_info->{jobid};
 
     $self->logger->trace("[livelog] Start live log for job: $job_id");
+
+    # TODO: isolate this
+    # Send first 10k of the log
+    {
+        my $log_size = $self->job_os_autoinst_file->stat->size;
+
+        # max(0, min(size, size - MAX_LIVELOG_CHUNK))
+        my $chunk_offset = List::Util::max(
+            0, List::Util::min($log_size,$log_size - MAX_LIVELOG_CHUNK)
+        );
+
+        my $chunk = Mojo::Asset::File->new(path => $self->job_os_autoinst_file->path)
+            ->get_chunk($chunk_offset, MAX_LIVELOG_CHUNK);
+
+        my $uri = "jobs/$job_id/status";
+
+        my $params = {
+            status => {
+                worker_id => $self->worker_id,
+                log => {
+                    data => $chunk,
+                }
+            }
+        };
+
+        $self->send_via_rest(POST => $uri, {json => $params});
+    }
     $self->livelog_status(1);
 }
 
-sub stop_livelog {
+sub worker_push_livelog {
+    my ($self, $line) = @_;
+
+    my $message = {log_line => $line, filename => 'autoinst-log-live.txt'};
+
+    $self->send_via_ws(
+        OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_PUSH,
+        $message,
+        sub {
+            $self->logger->info("  [livelog] sent: ", $line);
+        });
+}
+
+sub worker_stop_livelog {
     my ($self, $job_info) = @_;
     my $job_id = $job_info->{jobid};
 
     $self->logger->trace("[livelog] Stop live log for job: $job_id");
-    $self->livelog_status(1);
+    $self->livelog_status(0);
 }
 
 sub job_grab {
@@ -96,6 +150,17 @@ sub job_grab {
 
 sub configure_callbacks {
     my ($self) = @_;
+
+    Mojo::IOLoop->singleton->reactor->on(error => sub {
+        my ($reactor, $err) = @_;
+
+        $self->logger->error("Unhandled Error: $err");
+        $self->logger->error("Exiting");
+
+        $self->exit_status(127);
+        $reactor->stop();
+        $self->disconnect();
+    });
 
     # Worker Status State Machine
     # Every time the worker status changes, the broker must be notified.
@@ -129,11 +194,11 @@ sub configure_callbacks {
             }
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_STOP) {
-                $self->start_livelog($json);
+                $self->worker_stop_livelog($json);
             }
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_START) {
-                $self->stop_livelog($json);
+                $self->worker_start_livelog($json);
             }
         });
 
@@ -198,7 +263,14 @@ sub send_via_ws {
     # use Mojo::JSON 'encode_json';
     my ($self, $type, $json, $cb) = @_;
 
-    return undef unless $self->websocket_connection;
+    if (!$self->websocket_connection) {
+        $self->logger->context('worker', 'ws')->warn("-- [$type] -> openQA: RETRYING IN 5 SECONDS");
+        Mojo::IOLoop->timer(5 => sub {
+            $self->logger->context('worker', 'ws')->warn("-- [$type] -> openQA: REPLAY");
+            $self->send_via_ws($type, $json, $cb);
+        });
+        return;
+    }
 
     $self->logger->context('worker', 'ws')->trace("-- [$type] -> openQA: " . Mojo::JSON::encode_json($json));
 
@@ -256,6 +328,7 @@ sub sync_worker_status {
 sub engine_start {
     my ($self) = @_;
     my $job_id = $self->current_job->{id};
+    my $instance_number = $self->instance_number;
 
     # notify openqa we started working
     $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_WORKING);
@@ -264,6 +337,17 @@ sub engine_start {
 
     $logger->info("---- [parent] START OF WORK ----");
 
+
+    my $workdir = prjdir() . "/pool/$instance_number/JOB-$job_id";
+
+    my $path = Mojo::File::path($workdir)->make_path;
+
+    $self->job_pool_dir($path);
+
+    my $autoinst_log_file = $path->child(OS_AUTOINST_LOG);
+
+    $self->job_os_autoinst_file($autoinst_log_file);
+
     my $subprocess = Mojo::IOLoop->subprocess->run(
         sub {
             my ($subprocess) = @_;
@@ -271,7 +355,9 @@ sub engine_start {
             $logger->info("---- [child] START OF WORK ----");
 
             # Mimic some work
-            map { $subprocess->progress("First: log line: $_") and sleep 0.1; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+            map { $subprocess->progress("First: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+            map { $subprocess->progress("Second: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+            map { $subprocess->progress("Third: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 
             $logger->info("---- [child] END OF WORK ----");
         },
@@ -287,7 +373,7 @@ sub engine_start {
                     reason => 'done'
                 },
                 sub {
-                    # Upload job results
+                    # Mark the job as completed
                     $self->job_complete();
                 });
         });
@@ -301,12 +387,17 @@ sub engine_start {
 
     $subprocess->on(
         progress => sub {
-            my ($subprocess, @data) = @_;
+            my ($subprocess, $line) = @_;
             my $pid = $subprocess->pid;
-            $logger->info(": $pid | \$\$: ", $$, " ", @data);
+
+            $logger->info("PROGRESS: $line");
+
+            my $autoinst_log_file_filehandle = $autoinst_log_file->open('+>>');
+            print $autoinst_log_file_filehandle $line;
+            $autoinst_log_file_filehandle->close();
 
             if ($self->livelog_status) {
-                $self->logger->info("  ??: Livelog: ", @data);
+                $self->worker_push_livelog($line);
             }
         });
 
@@ -314,6 +405,7 @@ sub engine_start {
         cleanup => sub {
             my ($subprocess) = @_;
             my $pid = $subprocess->pid;
+
             $logger->info(" | PID: $pid \$\$: ", $$);
         });
 }
@@ -322,8 +414,7 @@ sub job_upload_artifacts {
     my ($self) = @_;
 
     my $job_id = $self->current_job->{'id'};
-    my $asset = Mojo::Asset::File->new(path => '/tmp/result.txt');
-    $asset->slurp;
+    my $asset = Mojo::Asset::File->new(path => $self->job_os_autoinst_file->path);
 
     $self->send_via_rest(
         POST => "jobs/$job_id/artefact",
@@ -334,6 +425,14 @@ sub job_upload_artifacts {
                 file => {file => $asset}
             },
         });
+}
+
+sub job_cleanup {
+    my ($self) = @_;
+
+    $self->current_job(undef);
+    $self->job_pool_dir(undef);
+    $self->job_os_autoinst_file(undef);
 }
 
 # Mark a job as done
@@ -359,7 +458,7 @@ sub job_complete {
             ok => 1
         },
         sub {
-            $self->current_job(undef);
+            $self->job_cleanup();
             $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_FREE);
         });
 }
@@ -433,7 +532,6 @@ sub connect_to_broker {
         $url,
         {'Sec-WebSocket-Extensions' => 'permessage-deflate'} => sub {
             my ($ua, $tx) = @_;
-
             if (!$tx->is_websocket) {
                 $self->logger->info('WebSocket handshake failed!');
                 $self->handle_connection_error($tx);
@@ -457,6 +555,15 @@ sub connect_to_broker {
                     my ($ws, $code, $reason) = @_;
 
                     $self->logger->context('worker', 'ws')->info("closed connection with code: $code");
+                    $self->logger->context('worker', 'ws')->info("Will retry in 5 secs...");
+                    $self->websocket_connection(undef);
+
+                    Mojo::IOLoop->timer(10 => sub {
+                        $self->logger->context('worker', 'ws')->info("Retrying");
+                        # TODO: keep count of retries...
+                        $self->connect_to_broker();
+                    });
+                
                 });
 
             $self->websocket_connection->on(
@@ -475,10 +582,16 @@ sub disconnect {
 
     return unless $self->websocket_connection;
 
+    Mojo::IOLoop->timer(5 => sub {
+        $self->logger->info("FORCEFULLY STOPPING");
+        Mojo::IOLoop->stop;
+    });
+
     $self->send_via_ws(
         OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_QUIT,
         {},
         sub {
+            $self->logger->info("NOTIFIED OPENQA");
             $self->websocket_connection->finish() if $self->websocket_connection;
             $self->websocket_connection(undef);
             Mojo::IOLoop->stop;

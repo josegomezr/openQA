@@ -234,6 +234,14 @@ sub _message {
         # consider the worker idle unless it claims to be broken or work on a job
         $worker_status->{idle_despite_job_assignment}
           = !$worker_is_broken && !defined $job_id && defined $current_job_id;
+    }elsif ($message_type eq 'livelog_push') {
+        my $workers = $schema->resultset('Workers');
+
+        $worker_db->job->append_log({
+            data => $json->{log_line}
+        }, $json->{filename});
+
+        $tx->send({json => {type => 'info', ack => 1, from => $message_type}});
     }
     else {
         log_error(sprintf('Received unknown message type "%s" from worker %u', $message_type, $worker_status->{id}));

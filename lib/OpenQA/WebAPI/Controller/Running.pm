@@ -94,7 +94,7 @@ sub streamtext ($self, $file_name, $start_hook = undef, $close_hook = undef) {
     my $log;
     my ($ino, $size);
 
-    $self->write("data: " . encode_json(["Streaming the last 10k bytes from $logfile"]) . "\n\n");
+    # $self->write("data: " . encode_json(["Streaming the last 10k bytes from $logfile"]) . "\n\n");
 
     if (open($log, '<', $logfile)) {
         # Send the last 10KB of data from the logfile, so that
