@@ -49,10 +49,11 @@ has client => sub {
 
     return OpenQA::Client->new(
         api => $self->api_url,
-        apikey => 'B9A352ABDA77D60F',
-        apisecret => '17D878A9811CB414',
+        apikey => '1234567890ABCDEF',
+        apisecret => '1234567890ABCDEF',
     );
 };
+
 
 has command_server => sub {
     # TODO: make this a socket on the JOB folder.
