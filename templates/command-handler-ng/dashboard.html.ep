@@ -1,0 +1,93 @@
+% title 'Command Server Dashboard';
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title><%= title %></title>
+    <!-- TODO: Serve these from assets dir. -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM" crossorigin="anonymous">
+    <link href=" https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css " rel="stylesheet">
+  </head>
+  <body>
+    <div class="container my-5">
+      <h1>Command Server Dashboard</h1>
+
+      <h2>Live view</h2>
+      <div id="live-terminal"></div>
+
+      <h1>Events</h1>
+      <div id="server-events"></div>
+    </div>
+
+    <!-- TODO: Serve these from assets dir. -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js" integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
+    <script src=" https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js "></script>
+
+    <!-- TODO: Serve these from assets dir. -->
+    <script>
+      const terminalCfg = {
+        cursorStyle: 'underline',
+        disableStdin: true,
+        rows: 24,
+        cols: 120,
+      };
+
+      var liveTerminal = new Terminal(terminalCfg);
+      liveTerminal.open(document.getElementById('live-terminal'));
+
+      var serverEvents = new Terminal({
+        ...terminalCfg,
+        cursorBlink: false,
+        cursorInactiveStyle: 'none',
+        rows: 16,
+        cols: 120,
+      });
+
+      serverEvents.open(document.getElementById('server-events'));
+
+      function connect(opts) {
+        opts = opts || {};
+        const { reconnect= false } = opts;
+
+        let ws = new WebSocket(`ws://${document.location.host}/feed`);
+
+        ws.onopen = (event) => {
+          console.log('connected to feed endpoint', reconnect);
+          serverEvents.write('connected to feed endpoint', reconnect);
+          // first time: request the previous event log
+          if (!reconnect) ws.send('load-event-log');
+        };
+
+        ws.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          // if it's terminal output: feed the terminal
+          if (message.type == 'terminal-output') {
+            return liveTerminal.write(message.line);
+          }
+
+          // else feed the event log
+          serverEvents.write(event.data);
+          serverEvents.write("\r\n")
+        };
+
+        ws.onclose = function(e) {
+          console.log('Socket is closed. Reconnect will be attempted in 1 second.', e);
+          setTimeout(function() {
+            connect({
+              reconnect: true
+            });
+          }, 1000);
+        };
+
+        ws.onerror = function(err) {
+          console.error('Socket encountered error: ', err.message, 'Closing socket');
+          ws.close();
+        };
+      }
+
+      connect();
+    </script>
+  </body>
+</html>

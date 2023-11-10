@@ -96,15 +96,15 @@ sub run {
     $self->logger->info("Connecting to OpenQA Instance");
     $self->logger->info(sprintf("REST+WS API %s", OpenQA::WorkerNg::Helper::host_and_proto_of($self->api_url)));
 
-    $self->configure_callbacks();
+    $self->_configure_callbacks();
 
-    return undef unless $self->authenticate();
+    return undef unless $self->_authenticate();
     $self->logger->trace("Identified as Worker-ID: " . $self->worker_id);
-    return undef unless $self->connect_to_broker();
+    return undef unless $self->_connect_to_broker();
 
 }
 
-sub worker_start_livelog {
+sub job_start_livelog {
     my ($self, $job_info) = @_;
     my $job_id = $job_info->{jobid};
 
@@ -134,17 +134,17 @@ sub worker_start_livelog {
             }
         };
 
-        $self->send_via_rest(POST => $uri, {json => $params});
+        $self->_send_via_rest(POST => $uri, {json => $params});
     }
     $self->livelog_status(1);
 }
 
-sub worker_push_livelog {
+sub job_push_livelog {
     my ($self, $line) = @_;
 
     my $message = {log_line => $line, filename => 'autoinst-log-live.txt'};
 
-    $self->send_via_ws(
+    $self->_send_via_ws(
         OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_PUSH,
         $message,
         sub {
@@ -152,7 +152,7 @@ sub worker_push_livelog {
         });
 }
 
-sub worker_stop_livelog {
+sub job_stop_livelog {
     my ($self, $job_info) = @_;
     my $job_id = $job_info->{jobid};
 
@@ -169,11 +169,11 @@ sub job_grab {
             job_id => $message->{job}->{id}
         },
         sub {
-            $self->job_can_grab($message);
+            $self->job_accept($message);
         });
 }
 
-sub configure_callbacks {
+sub _configure_callbacks {
     my ($self) = @_;
 
     Mojo::IOLoop->singleton->reactor->on(error => sub {
@@ -193,7 +193,7 @@ sub configure_callbacks {
         status_change => sub {
             my ($self, $status, $extra_context, $cb) = @_;
             $self->logger->trace(sprintf("transition from '%s' to '%s'", $self->status, $status));
-            $self->sync_worker_status($status, $extra_context, $cb);
+            $self->_sync_worker_status($status, $extra_context, $cb);
         });
 
     # OpenQA Commands
@@ -211,7 +211,7 @@ sub configure_callbacks {
             # I'm sure there's a more elegant way to do this, but if-elses will sufice
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_GRAB_JOB) {
-                $self->job_grab($json);
+                $self->_worker_can_grab_job($json);
             }
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_INFO) {
@@ -219,19 +219,19 @@ sub configure_callbacks {
             }
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_STOP) {
-                $self->worker_stop_livelog($json);
+                $self->job_stop_livelog($json);
             }
 
             if ($message eq OpenQA::WorkerNg::Constants::WS_OPENQA_COMMAND_LIVELOG_START) {
-                $self->worker_start_livelog($json);
+                $self->job_start_livelog($json);
             }
         });
 
 }
 
-sub job_can_grab {
+sub _worker_can_grab_job {
     my ($self, $job_info) = @_;
-    return $self->accept_job($job_info);
+    return $self->job_grab($job_info);
 
     # return $self->job_reject($job_info);
 }
@@ -240,7 +240,7 @@ sub job_reject {
     my ($self, $job_info) = @_;
     my $job_id = $job_info->{'job'}->{'id'};
     my $message = {job_ids => [$job_id]};
-    $self->send_via_ws(
+    $self->_send_via_ws(
         OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_REJECT_JOBS,
         $message,
         sub {
@@ -258,10 +258,10 @@ sub job_post_status {
     my $uri = "jobs/$job_id/status";
 
     my $params = {status => {worker_id => $self->worker_id}};
-    $self->send_via_rest(POST => $uri, {json => $params});
+    $self->_send_via_rest(POST => $uri, {json => $params});
 }
 
-sub accept_job {
+sub job_accept {
     my ($self, $job_info) = @_;
 
     $self->current_job($job_info->{'job'});
@@ -272,7 +272,7 @@ sub accept_job {
     #
     # Websockets *has* to be first, then REST, else REST fails because worker
     # is not associated yet.
-    $self->send_via_ws(
+    $self->_send_via_ws(
         OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_ACCEPT_JOB,
         $message,
         sub {
@@ -284,7 +284,7 @@ sub accept_job {
         });
 }
 
-sub send_via_ws {
+sub _send_via_ws {
     # use Mojo::JSON 'encode_json';
     my ($self, $type, $json, $cb) = @_;
 
@@ -292,7 +292,7 @@ sub send_via_ws {
         $self->logger->context('worker', 'ws')->warn("-- [$type] -> openQA: RETRYING IN 5 SECONDS");
         Mojo::IOLoop->timer(5 => sub {
             $self->logger->context('worker', 'ws')->warn("-- [$type] -> openQA: REPLAY");
-            $self->send_via_ws($type, $json, $cb);
+            $self->_send_via_ws($type, $json, $cb);
         });
         return;
     }
@@ -314,7 +314,7 @@ sub send_via_ws {
         });
 }
 
-sub send_via_rest {
+sub _send_via_rest {
     my ($self, $method, $path, $headers, $body) = @_;
 
     my $url = $self->api_url->clone->path($path);
@@ -332,7 +332,7 @@ sub send_via_rest {
     return $tx;
 }
 
-sub sync_worker_status {
+sub _sync_worker_status {
     my ($self, $status, $extra_context, $cb) = @_;
     $self->status($status);
 
@@ -342,7 +342,7 @@ sub sync_worker_status {
 
     $message = $merger->merge($message, $extra_context);
 
-    $self->send_via_ws(
+    $self->_send_via_ws(
         OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_WORKER_STATUS,
         $message,
         sub {
@@ -424,7 +424,7 @@ sub engine_start {
             $autoinst_log_file_filehandle->close();
 
             if ($self->livelog_status) {
-                $self->worker_push_livelog($line);
+                $self->job_push_livelog($line);
             }
         });
 
@@ -443,7 +443,7 @@ sub job_upload_artifacts {
     my $job_id = $self->current_job->{'id'};
     my $asset = Mojo::Asset::File->new(path => $self->job_os_autoinst_file->path);
 
-    $self->send_via_rest(
+    $self->_send_via_rest(
         POST => "jobs/$job_id/artefact",
         {"X-Normal-Upload" => 1},
         {
@@ -477,7 +477,7 @@ sub job_complete {
     $self->job_upload_artifacts();
 
     $params->{worker_id} = $self->worker_id;
-    $self->send_via_rest(POST => "jobs/$job_id/set_done", {form => $params});
+    $self->_send_via_rest(POST => "jobs/$job_id/set_done", {form => $params});
 
     $self->emit(
         status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPED,
@@ -490,20 +490,20 @@ sub job_complete {
         });
 }
 
-sub authenticate {
+sub _authenticate {
     my $self = shift;
     my $capabilities = $self->compute_capabilities();
     my $url = 'workers';
 
     # $self->logger->info("Registering Worker to: " . $url->host_port);
-    # my $tx = $self->send_via_rest(POST => $url, {json => $capabilities});
+    # my $tx = $self->_send_via_rest(POST => $url, {json => $capabilities});
     #                                              ^^^^
     #                                              doesn't work
 
-    my $tx = $self->send_via_rest(POST => $url, {form => $capabilities});
+    my $tx = $self->_send_via_rest(POST => $url, {form => $capabilities});
     # Bail when registering fails
     if ($tx->error) {
-        $self->handle_connection_error($tx);
+        $self->_handle_connection_error($tx);
         $self->exit_status(OpenQA::WorkerNg::Constants::EXIT_ERR_ANNOUNCE);
         $self->disconnect();
 
@@ -517,7 +517,7 @@ sub authenticate {
     $self->worker_id($worker_id);
 }
 
-sub handle_connection_error {
+sub _handle_connection_error {
     my ($self, $tx) = @_;
     my $error = $tx->error;
     my $error_code = $error->{code};
@@ -539,7 +539,7 @@ sub handle_connection_error {
     $self->logger->error($message);
 }
 
-sub connect_to_broker {
+sub _connect_to_broker {
     my $self = shift;
     my $worker_id = $self->worker_id;
     my $url = $self->api_url->clone->path("ws/$worker_id");
@@ -561,7 +561,7 @@ sub connect_to_broker {
             my ($ua, $tx) = @_;
             if (!$tx->is_websocket) {
                 $self->logger->info('WebSocket handshake failed!');
-                $self->handle_connection_error($tx);
+                $self->_handle_connection_error($tx);
                 $self->exit_status(OpenQA::WorkerNg::Constants::EXIT_ERR_WS);
                 $self->disconnect();
                 return;
@@ -588,7 +588,7 @@ sub connect_to_broker {
                     Mojo::IOLoop->timer(10 => sub {
                         $self->logger->context('worker', 'ws')->info("Retrying");
                         # TODO: keep count of retries...
-                        $self->connect_to_broker();
+                        $self->_connect_to_broker();
                     });
                 
                 });
@@ -614,7 +614,7 @@ sub disconnect {
         Mojo::IOLoop->stop;
     });
 
-    $self->send_via_ws(
+    $self->_send_via_ws(
         OpenQA::WorkerNg::Constants::WS_WORKER_COMMAND_QUIT,
         {},
         sub {
@@ -628,17 +628,17 @@ sub disconnect {
 sub configure_signal_handlers {
     my $self = shift;
     $SIG{HUP} = sub {
-        $self->handle_signals('HUP');
+        $self->_handle_signals('HUP');
     };
     $SIG{TERM} = sub {
-        $self->handle_signals('TERM');
+        $self->_handle_signals('TERM');
     };
     $SIG{INT} = sub {
-        $self->handle_signals('INT');
+        $self->_handle_signals('INT');
     };
 }
 
-sub handle_signals {
+sub _handle_signals {
     my $self = shift;
     my ($signal) = @_;
     $self->logger->info("caught: $signal");
