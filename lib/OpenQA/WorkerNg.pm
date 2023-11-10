@@ -3,7 +3,11 @@
 
 package OpenQA::WorkerNg;
 use Mojo::Base -base, 'Mojo::EventEmitter', -strict, -signatures, 'OpenQA::WorkerNg::Capabilities';
+use Mojolicious::Commands ();
+use Mojo::Server ();
+
 use OpenQA::WorkerNg::Constants ();
+use OpenQA::CommandServerNg ();
 use OpenQA::Client ();
 use Data::Dumper qw(Dumper);
 use Hash::Merge ();
@@ -22,7 +26,7 @@ use constant {
 };
 
 # new, registering, establishing_ws, connected, failed, disabled, quit
-has instance_number => 1;
+has instance_number => 2;
 has exit_status => sub { return OpenQA::WorkerNg::Constants::EXIT_SUCCESS };
 has livelog_status => sub { 0 };
 
@@ -45,11 +49,20 @@ has client => sub {
 
     return OpenQA::Client->new(
         api => $self->api_url,
-        apikey => '1234567890ABCDEF',
-        apisecret => '1234567890ABCDEF',
+        apikey => 'B9A352ABDA77D60F',
+        apisecret => '17D878A9811CB414',
     );
 };
 
+has command_server => sub {
+    # TODO: make this a socket on the JOB folder.
+    my $listen_addr = 'http://*:9999';
+
+    my $app = OpenQA::CommandServerNg->new();
+    my $server = Mojo::Server::Daemon->new()->app($app);
+    $server->listen([$listen_addr]);
+    return $server;
+};
 
 has job_pool_dir => undef;
 has job_os_autoinst_file => undef;
@@ -57,6 +70,17 @@ has job_os_autoinst_file => undef;
 has worker_id => undef;
 has current_job => undef;
 has websocket_connection => undef;
+
+sub engine_start_command_server {
+    my ($self, $socket_path) = @_;
+    say "listening on socket: $socket_path";
+    $self->command_server->start();
+}
+
+sub engine_stop_command_server {
+    my $self = shift;
+    $self->command_server->stop();
+}
 
 sub new {
     my ($class, @attrs) = @_;
@@ -347,6 +371,7 @@ sub engine_start {
     my $autoinst_log_file = $path->child(OS_AUTOINST_LOG);
 
     $self->job_os_autoinst_file($autoinst_log_file);
+    $self->engine_start_command_server($workdir . "/control.sock");
 
     my $subprocess = Mojo::IOLoop->subprocess->run(
         sub {
@@ -366,6 +391,7 @@ sub engine_start {
             my $pid = $subprocess->pid;
 
             $logger->info("---- [parent] END OF WORK ----");
+            $self->engine_stop_command_server();
 
             $self->emit(
                 status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPING,

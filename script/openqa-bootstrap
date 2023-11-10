@@ -42,7 +42,7 @@ fi
 if zypper -n search -x qemu-hw-display-virtio-gpu-pci ; then
     pkgs+=(qemu-hw-display-virtio-gpu qemu-hw-display-virtio-gpu-pci)
 fi
-zypper -n install --no-recommends "${pkgs[@]}"
+#zypper -n install --no-recommends "${pkgs[@]}"
 
 # setup database
 chown -R postgres: /var/lib/pgsql/ # fix broken postgres working dir permissions in the nspawn container
@@ -151,13 +151,13 @@ secret = ${API_SECRET}
 EOF
 
 
-# start worker
-if [ -z "$running_systemd" ]; then
-    /usr/bin/install -d -m 0755 -o _openqa-worker /var/lib/openqa/pool/1
-    su _openqa-worker -c '/usr/share/openqa/script/worker --instance 1'
-else
-    systemctl enable --now openqa-worker@1
-fi
+# # start worker
+# if [ -z "$running_systemd" ]; then
+#     /usr/bin/install -d -m 0755 -o _openqa-worker /var/lib/openqa/pool/1
+#     su _openqa-worker -c '/usr/share/openqa/script/worker --instance 1'
+# else
+#     systemctl enable --now openqa-worker@1
+# fi
 
 # clone job if job ID is given passing extra arguments as well
 # e.g.: openqa-bootstrap --from openqa.opensuse.org 12345 SCHEDULE=tests/boot/boot_to_desktop,tests/x11/kontact
