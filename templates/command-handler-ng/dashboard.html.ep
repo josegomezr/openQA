@@ -55,7 +55,7 @@
 
         ws.onopen = (event) => {
           console.log('connected to feed endpoint', reconnect);
-          serverEvents.write('connected to feed endpoint', reconnect);
+          serverEvents.write('connected to feed endpoint\r\n', reconnect);
           // first time: request the previous event log
           if (!reconnect) ws.send('load-event-log');
         };
