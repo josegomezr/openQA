@@ -25,10 +25,12 @@ my $ua = Mojo::UserAgent->new();
 my $container_tx;
 
 my $command_counter = 0;
-my $current_cmd;
-my $current_mark;
 
 my $GLOBAL_STATE = {state => 'idle',};
+
+my $ob_capture = 0;
+my $output_buffer;
+open(my $output_buffer_writer, "+<", \$output_buffer) or die "Can't open memory file: $!";
 
 sub stop_container {
     my $promise = Mojo::Promise->new();
@@ -199,8 +201,6 @@ sub normalize_stream_output {
 sub handle_container_connection {
     my ($tx) = @_;
 
-    my $timer;
-
     $tx->res->content->unsubscribe('read');
     $tx->res->content->on(
         read => sub {
@@ -209,37 +209,14 @@ sub handle_container_connection {
             my $output = normalize_stream_output($content_bytes);
             return unless $output;
 
+            print $output_buffer_writer $output if $ob_capture;
+
             $event_bus->emit(
                 'feed_update',
                 {
                     type => 'terminal-output',
                     line => $output
                 });
-
-            return if ($GLOBAL_STATE->{state} ne 'wait-for-marker');
-
-            Mojo::IOLoop->remove($timer) if ($timer);
-            $timer = Mojo::IOLoop->timer(
-                5 => sub {
-                    $event_bus->emit('command_expired');
-                    # Forcefully close container socket
-                    # $tx->closed or $tx->completed will wait until timeout.
-                    $tx->res->content->unsubscribe('read');
-                    $tx->req->finish();
-                    $tx->res->finish();
-                    $tx->closed();
-                    $tx->completed();
-                    # Mojo::IOLoop->stream($tx->connection)->close_gracefully();
-                });
-
-            return unless $current_mark;
-            return unless $output =~ $current_mark;
-
-            $current_mark = undef;
-            $event_bus->emit('found_needle');
-
-            Mojo::IOLoop->remove($timer) if ($timer);
-            $GLOBAL_STATE->{state} = 'wait-for-command';
         });
 }
 
@@ -329,6 +306,34 @@ sub unpack_framed_streams {
     return unpack("($FRAME_STRUCTURE)*", shift);
 }
 
+sub wait_for_needle {
+    my ($current_mark) = @_;
+    my $promise = Mojo::Promise->new();
+    my $timer;
+    my $recurring;
+
+    $timer = Mojo::IOLoop->timer(
+        8 => sub {
+            $promise->reject('command_expired');
+            
+            Mojo::IOLoop->remove($timer) if $timer;
+            Mojo::IOLoop->remove($recurring) if $recurring;
+        });
+
+    $recurring = Mojo::IOLoop->recurring(3 => sub {
+        my $found = $output_buffer =~ $current_mark;
+        # clear output buffer
+        $output_buffer = '';
+        return unless $found;
+
+        $promise->resolve(@{^CAPTURE});
+        Mojo::IOLoop->remove($timer) if $timer;
+        Mojo::IOLoop->remove($recurring) if $recurring;
+    });
+
+    return $promise;
+}
+
 sub send_command {
     my $promise = Mojo::Promise->new();
     ++$command_counter;
@@ -336,25 +341,38 @@ sub send_command {
     # Watch out here, markers are unquoted strings in sh to make it easy for
     # perl regexes.
     my $start_mark = "%${command_counter}_START_MARKER_${command_counter}%";
-    my $end_mark = "%${command_counter}_END_MARKER_${command_counter}%";
+    my $end_mark = "%${command_counter}_END_MARKER_\${?}_${command_counter}%";
+    
+    # ignore the mark after an echo, TTY's will reply everything you type in it.
+    my $end_mark_regex = qr{(?<![echo ])%(?:\d+)_END_MARKER_(?<exit_code>\d+)_(?:\d+)%};
 
+    $ob_capture = 1;
     type_string($tx, "echo $start_mark; $cmd;echo $end_mark;\n")->then(
         sub {
-            $GLOBAL_STATE->{state} = 'wait-for-marker';
+            _notify_state_fn($event_bus, 'wait-for-marker');
+            return wait_for_needle($end_mark_regex);
+    })->then(
+        sub {
+            my ($exit_status) = @_;
+            
+            _notify_state_fn($event_bus, 'found_needle', {
+                exit_code => $exit_status
+            });
 
-            $current_cmd = $cmd;
-            # ignore the mark after an echo, TTY's will reply everything you type in it.
-            $current_mark = qr{(?<![echo ])$end_mark};
+            $promise->resolve();
+            return;
+        }, sub {
+            # Forcefully close container socket
+            # $tx->closed or $tx->completed will wait until timeout, but:
+            # $tx->req->finish(); or $tx->res->finish(); break my mitmproxy...
+            $tx->res->content->unsubscribe('read');
+            $tx->closed();
+            $tx->completed();
 
-            $event_bus->once(
-                found_needle => sub {
-                    $promise->resolve();
-                });
-
-            $event_bus->once(
-                command_expired => sub {
-                    $promise->reject('command-expired');
-                });
+            $promise->reject(@_);
+            return;
+        })->finally(sub {
+            $ob_capture = 0;
         });
 
     return $promise;
