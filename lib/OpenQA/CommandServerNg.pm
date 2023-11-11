@@ -28,324 +28,335 @@ my $command_counter = 0;
 my $current_cmd;
 my $current_mark;
 
-my $GLOBAL_STATE = {
-  state => 'idle',
-};
+my $GLOBAL_STATE = {state => 'idle',};
 
 sub stop_container {
-  my $promise = Mojo::Promise->new();
-  my $url = $base_url->clone->path('containers/perl-test/stop');
+    my $promise = Mojo::Promise->new();
+    my $url = $base_url->clone->path('containers/perl-test/stop');
 
-  $ua->post($url, {Host => 'docker'}, json => { t => 1 }, sub {
-    my ($ua, $tx) = @_;
+    $ua->post(
+        $url,
+        {Host => 'docker'},
+        json => {t => 1},
+        sub {
+            my ($ua, $tx) = @_;
 
-    if ($tx->res->error) {
-      my $reason = $tx->res->error;
-      $reason = $tx->result->json if $tx->res->code;
-      $promise->reject($reason);
-      return;
-    }
+            return $promise->resolve() unless $tx->res->error;
 
-    $promise->resolve();
-    # print Mojo::Util::dumper($tx->result->json);
-  });
+            my $reason = $tx->res->error;
+            $reason = $tx->result->json if $tx->res->code;
+            $promise->reject($reason);
+            # print Mojo::Util::dumper($tx->result->json);
+        });
 
-  return $promise;
+    return $promise;
 }
 
 sub delete_container {
-  my $promise = Mojo::Promise->new();
+    my $promise = Mojo::Promise->new();
 
-  my $url = $base_url->clone->path('containers/perl-test');
-  $ua->delete($url, {Host => 'docker'}, json => { force => Mojo::JSON->true }, sub {
-    my ($ua, $tx) = @_;
+    my $url = $base_url->clone->path('containers/perl-test');
+    $ua->delete(
+        $url,
+        {Host => 'docker'},
+        json => {force => Mojo::JSON->true},
+        sub {
+            my ($ua, $tx) = @_;
+            return $promise->resolve($tx->result->json) unless $tx->res->error;
+            my $reason = $tx->res->error;
+            $reason = $tx->result->json if $tx->res->code;
+            $promise->reject($reason);
+            # print Mojo::Util::dumper($tx->result->json);
+        });
 
-    if ($tx->res->error) {
-      my $reason = $tx->res->error;
-      $reason = $tx->result->json if $tx->res->code;
-      $promise->reject($reason);
-      return;
-    }
-
-    $promise->resolve();
-    # print Mojo::Util::dumper($tx->result->json);
-  });
-
-  return $promise;
+    return $promise;
 }
 
+# hacks by me
+my $is_a_tty = 1;
+
 sub create_container {
-  my $promise = Mojo::Promise->new();
-  my $url = $base_url->clone->path('containers/create');
+    my $promise = Mojo::Promise->new();
+    my $url = $base_url->clone->path('containers/create');
 
-  $url->query
-    ->param('Name', 'perl-test');
+    $url->query->param('Name', 'perl-test');
 
-  my $params = {
-      Hostname => 'openqa-test',
-      Cmd => ['sh'],
-      Image => 'registry.opensuse.org/opensuse/leap',
-      AttachStdin => Mojo::JSON->true,
-      AttachStdout => Mojo::JSON->true,
-      AttachStderr => Mojo::JSON->true,
-      OpenStdin => Mojo::JSON->true,
-      StdinOnce => Mojo::JSON->true,
-      ConsoleSize => [24,80],
-      Tty => Mojo::JSON->true,
-      HostConfig => {
-        AutoRemove => Mojo::JSON->true,
-      },
-  };
+    my $params = {
+        Hostname => 'openqa-test',
+        Cmd => ['sh'],
+        Image => 'registry.opensuse.org/opensuse/leap',
+        AttachStdin => Mojo::JSON->true,
+        AttachStdout => Mojo::JSON->true,
+        AttachStderr => Mojo::JSON->true,
+        OpenStdin => Mojo::JSON->true,
+        StdinOnce => Mojo::JSON->true,
+        ConsoleSize => [24, 80],
+        Tty => $is_a_tty ? Mojo::JSON->true : Mojo::JSON->false,
+        Env => ["PS1=# "],
+        HostConfig => {
+            AutoRemove => Mojo::JSON->true,
+        },
+    };
 
-  $ua->post($url, {Host => 'docker'}, json => $params => sub {
-    my ($ua, $tx) = @_;
+    $ua->post(
+        $url,
+        {Host => 'docker'},
+        json => $params => sub {
+            my ($ua, $tx) = @_;
 
-    if ($tx->res->error && (!$tx->res->code || $tx->res->code != 404)) {
-      my $reason = $tx->res->error;
-      $reason = $tx->result->json if $tx->res->code;
-      $promise->reject($reason);
-      return;
-    }
+            my $has_error = $tx->res->error && (!$tx->res->code || $tx->res->code != 404);
 
-    $promise->resolve($tx->result->json);
-  });
+            return $promise->resolve($tx->result->json) unless $has_error;
 
-  return $promise;
+            my $reason = $tx->res->error;
+            $reason = $tx->result->json if $tx->res->code;
+            $promise->reject($reason);
+        });
+
+    return $promise;
 }
 
 sub attach_container {
-  my ($cid) = @_;
-  my $promise = Mojo::Promise->new();
+    my ($cid) = @_;
+    my $promise = Mojo::Promise->new();
 
-  my $url = $base_url->clone->path("containers/$cid/attach");
-  $url->query
-      ->param('stream', 1)
-      ->param('stdout', 1)
-      ->param('stdin', 1)
-      ->param('logs', 1)
-      ->param('stderr', 1)
-      ;
+    my $url = $base_url->clone->path("containers/$cid/attach");
+    $url->query->param('stream', 1)->param('stdout', 1)->param('stdin', 1)->param('logs', 1)->param('stderr', 1);
 
-  $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
-  $ua->inactivity_timeout(500);
+    $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
+    $ua->inactivity_timeout(500);
 
-  $container_tx->res->content->unsubscribe('read');
-  $container_tx->res->content->once(read => sub {
-      my ($content, $content_bytes) = @_;
-      $promise->resolve($container_tx);
-  });
+    handle_container_connection($container_tx);
+    $container_tx->res->content->once(
+        read => sub {
+            my ($content, $content_bytes) = @_;
+            $promise->resolve($container_tx);
+        });
 
-  $container_tx->on(error => sub {
-    say 'error in the container tx';
-    $promise->reject('container-tx-error');
-  });
+    $container_tx->on(
+        error => sub {
+            say 'error in the container tx';
+            $promise->reject('container-tx-error');
+        });
 
-  $ua->start($container_tx, sub {
-    say 'SOCKET CLOSED';
-    $container_tx = undef;
-    delete $GLOBAL_STATE->{'cid'};
-  });
+    $ua->start(
+        $container_tx,
+        sub {
+            say 'SOCKET CLOSED';
+            $container_tx = undef;
+            delete $GLOBAL_STATE->{'cid'};
+        });
 
-  return $promise;
+    return $promise;
 }
 
-sub handle_container_connection {
-  my ($tx) = @_;
+sub detect_stream_type {
+    my ($content_bytes) = @_;
 
-  my $timer;
-
-  $tx->res->content->unsubscribe('read');
-  $tx->res->content->on(read => sub {
-    my ($content, $content_bytes) = @_;
-
-    if ($GLOBAL_STATE->{state} eq 'wait-for-marker') {
-      if($timer){
-        # say 'renewing timer';
-        Mojo::IOLoop->remove($timer);
-      }
-
-      # say 'adding timer';
-      $timer = Mojo::IOLoop->timer(5 => sub {
-        # say 'abort command execution';
-        $tx->emit('command_expired');
-        $tx->completed;
-      });
-    }
-
-    return unless $content_bytes;
-
-    my $found = 0;
     # Multiplexed output has a frame header with 8 bytes.
     # bytes 1-3 are NUL.
 
-    my ($stream_type, $nul1,$nul2,$nul3) = unpack("CCCC", $content_bytes);
+    my ($stream_type, $nul1, $nul2, $nul3) = unpack("CCCC", $content_bytes);
+    # safeguard for short strings that could break the assertions below.
     $stream_type //= 255;
 
-    #                         STDIN                   STDOUT                  STDERR
-    my $looks_like_a_stream = $stream_type == 0 || $stream_type == 1 || $stream_type == 2;
+    #                           STDIN                STDOUT               STDERR
+    # my $looks_like_a_stream = $stream_type == 0 || $stream_type == 1 || $stream_type == 2;
+    # my $looks_like_a_stream = (grep { $stream_type == $_ } (0..2)) == 1;
+    my $looks_like_a_stream = $stream_type >= 0 && $stream_type <= 2;
     my $padding_bytes_present = defined $nul1 && defined $nul2 && defined $nul3;
-    my $padding_bytes_are_zero = ($nul1//0)+($nul2//0)+($nul3//0);
+    my $padding_bytes_are_zero = (($nul1 // 0) + ($nul2 // 0) + ($nul3 // 0)) == 0;
+    my $is_multiplexed_stream = $looks_like_a_stream && $padding_bytes_present && $padding_bytes_are_zero;
 
-    my $is_multiplexed = $looks_like_a_stream && $padding_bytes_present && $padding_bytes_are_zero;
+    return 'multiplexed' if $is_multiplexed_stream;
+    return 'raw';
+}
 
-    if($is_multiplexed){
-      say 'Multiplexed output';
-      my @frames = unpack_framed_streams($content_bytes);
-      while (@frames){
-        my ($stream_type, $stream_size, $stream_content) = splice(@frames, 0, 3);
-
-        say $STREAM_NAMES{$stream_type}, ": ", $stream_content;
-
-        $event_bus->emit('feed_update', {
-          type => 'terminal-output',
-          line => "$stream_content\n"
-        });
-
-        $event_bus->emit('command_stdout', $stream_content) if $STREAM_NAMES{$stream_type} eq 'STDOUT';
-        $event_bus->emit('command_stderr', $stream_content) if $STREAM_NAMES{$stream_type} eq 'STDERR';
-
-        continue unless $current_mark;
-
-        my $mark = $current_mark;
-        if($stream_content =~ qr{$mark}) {
-          $current_mark = undef;
-          $event_bus->emit('found_needle');
-
-          if($timer){
-            # say 'clearing timer';
-            Mojo::IOLoop->remove($timer);
-          }
-          # say 'Finished command';
-          $GLOBAL_STATE->{state} = 'wait-for-command';
-        }
-      }
-    }else{
-      $event_bus->emit('feed_update', {
-        type => 'terminal-output',
-        line => $content_bytes
-      });
-
-      return unless $current_mark;
-      my $mark = $current_mark;
-
-      if($content_bytes =~ qr{$mark}) {
-        $current_mark = undef;
-        $event_bus->emit('found_needle');
-
-        if($timer){
-          # say 'clearing timer';
-          Mojo::IOLoop->remove($timer);
-        }
-        # say 'Finished command';
-        $GLOBAL_STATE->{state} = 'wait-for-command';
-      }
+sub normalize_stream_output {
+    my ($content_bytes) = @_;
+    my $output = "";
+    # if it's a raw TTY, no processing is needed
+    if (detect_stream_type($content_bytes) eq 'raw') {
+        return $content_bytes;
     }
-  });
+    # Unpack the stream. See HTTP Transport Hijacking on:
+    # - https://docs.docker.com/engine/api/v1.43/#tag/Container/operation/ContainerAttach
+    # - https://docs.podman.io/en/latest/_static/api.html#tag/containers/operation/ContainerAttachLibpod
+    my @frames = unpack_framed_streams($content_bytes);
+    while (@frames) {
+        my ($stream_type, $stream_size, $stream_content) = splice(@frames, 0, 3);
+        # say $STREAM_NAMES{$stream_type}, ": ", $stream_content;
+
+        $output .= $stream_content;
+    }
+
+    # Normalize newlines for frontend (output is not a tty raw stream).
+    $output =~ s/(?<!\r)\n/\r\n/g;
+
+    return $output;
+}
+
+sub handle_container_connection {
+    my ($tx) = @_;
+
+    my $timer;
+
+    $tx->res->content->unsubscribe('read');
+    $tx->res->content->on(
+        read => sub {
+            my ($content, $content_bytes) = @_;
+
+            my $output = normalize_stream_output($content_bytes);
+            return unless $output;
+
+            $event_bus->emit(
+                'feed_update',
+                {
+                    type => 'terminal-output',
+                    line => $output
+                });
+
+            return if ($GLOBAL_STATE->{state} ne 'wait-for-marker');
+
+            Mojo::IOLoop->remove($timer) if ($timer);
+            $timer = Mojo::IOLoop->timer(
+                5 => sub {
+                    $event_bus->emit('command_expired');
+                    # Forcefully close container socket
+                    # $tx->closed or $tx->completed will wait until timeout.
+                    $tx->res->content->unsubscribe('read');
+                    $tx->req->finish();
+                    $tx->res->finish();
+                    $tx->closed();
+                    $tx->completed();
+                    # Mojo::IOLoop->stream($tx->connection)->close_gracefully();
+                });
+
+            return unless $current_mark;
+            return unless $output =~ $current_mark;
+
+            $current_mark = undef;
+            $event_bus->emit('found_needle');
+
+            Mojo::IOLoop->remove($timer) if ($timer);
+            $GLOBAL_STATE->{state} = 'wait-for-command';
+        });
 }
 
 sub start_container {
-  my ($cid) = @_;
-  my $promise = Mojo::Promise->new();
-  my $url = $base_url->clone->path("containers/$cid/start");
-  return $ua->post($url, {Host => 'docker'}, sub {
-    # TODO: handle error.
-    $promise->resolve();
-  });
+    my ($cid) = @_;
+    my $promise = Mojo::Promise->new();
+    my $url = $base_url->clone->path("containers/$cid/start");
+    return $ua->post(
+        $url,
+        {Host => 'docker'},
+        sub {
+            # TODO: handle error.
+            $promise->resolve();
+        });
 
-  return $promise;
+    return $promise;
 }
 
 sub resize_container {
-  my ($cid) = @_;
-  my $promise = Mojo::Promise->new();
-  my $url = $base_url->clone->path("containers/$cid/resize");
-  $url->query
-      ->param('h', 24)
-      ->param('w', 80)
-      ;
-  $ua->post($url, {Host => 'docker'}, sub {
-    # TODO: handle error.
-    $promise->resolve();
-  });
-  return $promise;
+    my ($cid) = @_;
+    my $promise = Mojo::Promise->new();
+    my $url = $base_url->clone->path("containers/$cid/resize");
+    $url->query->param('h', 24)->param('w', 80);
+    $ua->post(
+        $url,
+        {Host => 'docker'},
+        sub {
+            # TODO: handle error.
+            $promise->resolve();
+        });
+    return $promise;
 }
 
 sub run_container {
-  my $promise = Mojo::Promise->new();
+    my $promise = Mojo::Promise->new();
 
-  say 'create-container';
-  create_container()
-    ->then(sub {
-      my ($container_info) = @_;
-      my $cid = $container_info->{Id};
+    # say 'create-container';
+    create_container()->then(
+        sub {
+            my ($container_info) = @_;
+            my $cid = $container_info->{Id};
 
-      # TODO: find a cleaner way for this chain.
-      $GLOBAL_STATE->{'cid'} = $cid;
-      return attach_container($cid);
-    }) # now after attaching
-    ->then(sub {
-      my ($tx) = @_;
-      return handle_container_connection($tx);
-    }) # now start
-    ->then(sub {
-      my $cid = $GLOBAL_STATE->{'cid'};
-      return start_container($cid);
-    }) # now resize
-    ->then(sub {
-      my $cid = $GLOBAL_STATE->{'cid'};
-      return resize_container($cid);
-    }) # finish all
-    ->then(sub {
-      $promise->resolve();
-      return;
-    })->catch(sub {
-      my ($reason) = @_;
-      say 'finishing! rejected', Mojo::Util::dumper($reason);
-      $promise->reject('error-running');
-      return;
-    });
-  
-  return $promise;
+            # TODO: find a cleaner way for this chain.
+            $GLOBAL_STATE->{'cid'} = $cid;
+            return attach_container($cid);
+        })    # now after attaching
+      ->then(
+        sub {
+            my ($tx) = @_;
+            return handle_container_connection($tx);
+        })    # now start
+      ->then(
+        sub {
+            my $cid = $GLOBAL_STATE->{'cid'};
+            return start_container($cid);
+        })    # now resize
+      ->then(
+        sub {
+            my $cid = $GLOBAL_STATE->{'cid'};
+            return resize_container($cid);
+        })    # finish all
+      ->then(
+        sub {
+            $promise->resolve();
+            return;
+        }
+    )->catch(
+        sub {
+            my ($reason) = @_;
+            # say 'finishing! rejected', Mojo::Util::dumper($reason);
+            $promise->reject('error-running');
+            return;
+        });
+
+    return $promise;
 }
 
 
-my $FRAME_STRUCTURE = ""
-    . 'C' # Stream type: 1 Byte
-    . 'x[3]' # Separator: 3 null bytes 
-    . 'N' # Length of stream (uint32, 4 bytes)
-    . 'X[4]' # Back-up 4 bytes
-    . 'N/a' # Pull N characters
-    ;
+my $FRAME_STRUCTURE = "" . 'C'    # Stream type: 1 Byte
+  . 'x[3]'    # Separator: 3 null bytes
+  . 'N'    # Length of stream (uint32, 4 bytes)
+  . 'X[4]'    # Back-up 4 bytes
+  . 'N/a'    # Pull N characters
+  ;
 
 sub unpack_framed_streams {
-  return unpack("($FRAME_STRUCTURE)*", shift);
+    return unpack("($FRAME_STRUCTURE)*", shift);
 }
 
 sub send_command {
     my $promise = Mojo::Promise->new();
     ++$command_counter;
     my ($tx, $cmd) = @_;
-    # Write the body directly
-    my $start_mark = "START_MARKER_$command_counter";
-    my $end_mark = "END_MARKER_$command_counter";
+    # Watch out here, markers are unquoted strings in sh to make it easy for
+    # perl regexes.
+    my $start_mark = "%${command_counter}_START_MARKER_${command_counter}%";
+    my $end_mark = "%${command_counter}_END_MARKER_${command_counter}%";
 
-    $tx->req->content->write("echo $start_mark; $cmd;echo $end_mark;\n",  sub {
-      $GLOBAL_STATE->{state} = 'wait-for-marker';
+    type_string($tx, "echo $start_mark; $cmd;echo $end_mark;\n")->then(
+        sub {
+            $GLOBAL_STATE->{state} = 'wait-for-marker';
 
-      $current_cmd = $cmd;
-      $current_mark = $end_mark;
+            $current_cmd = $cmd;
+            # ignore the mark after an echo, TTY's will reply everything you type in it.
+            $current_mark = qr{(?<![echo ])$end_mark};
 
-      $event_bus->once(found_needle => sub {
-        $promise->resolve();
-      });
+            $event_bus->once(
+                found_needle => sub {
+                    $promise->resolve();
+                });
 
-      $event_bus->once(command_expired => sub {
-        $promise->reject('command-expired');
-      });
-    });
+            $event_bus->once(
+                command_expired => sub {
+                    $promise->reject('command-expired');
+                });
+        });
 
-    # Flush
-    $tx->resume;
     return $promise;
 }
 
@@ -353,13 +364,17 @@ sub type_string {
     my $promise = Mojo::Promise->new();
     my ($tx, $string) = @_;
 
+    # print Mojo::Util::dumper($string);
+
     if (!$tx) {
-      $promise->reject('no-container-conn');
+        $promise->reject('no-container-conn');
     }
 
-    $tx->req->content->write("$string",  sub {
-      $promise->resolve();
-    });
+    $tx->req->content->write(
+        $string,
+        sub {
+            $promise->resolve();
+        });
 
     # Flush
     $tx->resume;
@@ -369,192 +384,204 @@ sub type_string {
 my $event_log = Mojo::File->new('command-server-event-log.json');
 
 sub load_event_log {
-  my ($tx) = @_;
-  my $fh = $event_log->touch->open('<');
-  
-  while( my $line = <$fh>)  {   
-    chomp($line);
-    $tx->send($line);
-  }
+    my ($tx) = @_;
+    my $fh = $event_log->touch->open('<');
+
+    while (my $line = <$fh>) {
+        chomp($line);
+        $tx->send($line);
+    }
 }
 
 sub _notify_state_fn {
-  my ($ev_bus, $conn, $ctx) = @_;
+    my ($ev_bus, $state, $ctx) = @_;
 
-  my $msg = {
-    type => 'state-update',
-    state => $GLOBAL_STATE->{state},
-    datetime => Mojo::Date->new()->to_datetime
-  };
+    $GLOBAL_STATE->{state} = $state;
+    my $conn = $GLOBAL_STATE->{connection};
+    my $msg = {
+        type => 'state-update',
+        state => $state,
+        datetime => Mojo::Date->new()->to_datetime
+    };
 
-  $msg->{context} = $ctx if $ctx;
+    $msg->{context} = $ctx if $ctx;
 
-  $event_bus->emit('feed_update', $msg);
-  $conn->write(Mojo::JSON::encode_json($msg) . "\n");
+    $ev_bus->emit('feed_update', $msg);
+    $conn->write(Mojo::JSON::encode_json($msg) . "\n") if $conn;
+}
+
+sub _configure_current_request {
+    my ($conn) = @_;
+
+    # websockets doesn't like this shennanigans...
+    return if $conn->tx->is_websocket;
+
+    $GLOBAL_STATE->{connection} = $conn;
+
+    $conn->on(
+        finish => sub {
+            delete $GLOBAL_STATE->{connection};
+        });
 }
 
 sub startup {
-	my ($self) = @_;
+    my ($self) = @_;
 
-  $event_bus->on('feed_update', sub {
-    my ($self, $data) = @_;
+    $self->hook(before_dispatch => sub ($c) { _configure_current_request($c) });
 
-    my $msg = Mojo::JSON::encode_json($data);
-    say "$msg\n";
+    $event_bus->on(
+        'feed_update',
+        sub {
+            my ($self, $data) = @_;
 
-    {
-      my $fh = $event_log->open('>>');
-      print $fh "$msg\n";
-    }
+            my $msg = Mojo::JSON::encode_json($data);
+            say "$msg\n";
 
-    foreach my $key (keys %{ $ws_clients }) {
-      $ws_clients->{$key}->send($msg);
-    }
-  });
+            # Write logs into the file
+            {
+                my $fh = $event_log->open('>>');
+                print $fh "$msg\n";
+            }
 
-  $self->routes->websocket('/feed' => sub {
-    my ($tx) = @_;
-    $ws_clients->{$tx} = $tx;
+            # Send updates to connected clients
+            foreach my $key (keys %{$ws_clients}) {
+                $ws_clients->{$key}->send($msg);
+            }
+        });
 
-    $tx->on(message => sub ($self, $msg) {
-      if ($msg eq 'load-event-log') {
-        load_event_log($self);
-        return;
-      }
-      $self->send("echo: $msg");
-    });
+    $self->routes->get(
+        '/' => sub {
+            my ($c) = @_;
+            $c->render('command-handler-ng/dashboard');
+        });
 
-    $tx->on(finish => sub ($self, $code, $reason) {
-      delete $ws_clients->{$tx} if $ws_clients->{$tx};
-    });
-  });
+    $self->routes->websocket(
+        '/feed' => sub {
+            my ($tx) = @_;
+            $tx->inactivity_timeout(300);
+            say 'ws: connected';
+            $ws_clients->{$tx} = $tx;
 
-  $self->routes->get('/' => sub {
-    my ($c) = @_;
-    $c->render('command-handler-ng/dashboard');
-  });
+            $tx->on(
+                message => sub ($self, $msg) {
+                    if ($msg eq 'load-event-log') {
+                        say 'sending event log';
+                        return load_event_log($self);
+                    }
 
-  $self->routes->post('/start' => sub {
-    my ($c) = @_;
-    $c->inactivity_timeout(300);
-    $GLOBAL_STATE->{state} = 'starting';
+                    $self->send("echo: $msg");
+                });
 
-    _notify_state_fn($event_bus, $c);
+            $tx->on(
+                finish => sub ($self, $code, $reason) {
+                    delete $ws_clients->{$tx} if $ws_clients->{$tx};
+                });
+        });
 
-    say '>>>run container';
-    run_container()
-      ->then(sub {
-        say '>>>success';
-        $GLOBAL_STATE->{state} = 'wait-for-command';
-        _notify_state_fn($event_bus, $c);
-        $event_log->open('>');
-        return type_string($container_tx, "\r");
-      })->catch(sub {
-        say '<<< fail';
-        $GLOBAL_STATE->{state} = 'error-starting';
-        _notify_state_fn($event_bus, $c, {ctx => @_});
-      })
-      ->finally(sub {
-        say '<<< close';
-        $c->finish();
-      });
-  });
 
-  $self->routes->post('/run-command' => sub {
-    my ($c) = @_;
-    my $cmd = $c->param('foo');
-    
-    return $c->render(json => { result => 'fail-no-command' }) unless $cmd;
-    return $c->render(json => { result => 'fail-no-container' }) unless $container_tx;
+    $self->routes->post(
+        '/start' => sub {
+            my ($c) = @_;
+            $c->inactivity_timeout(300);
 
-    $c->inactivity_timeout(0);
-    $GLOBAL_STATE->{state} = 'running-command';
-    _notify_state_fn($event_bus, $c);
+            _notify_state_fn($event_bus, 'starting');
 
-    send_command($container_tx, $cmd)
-      ->then(sub {
-        my ($json) = @_;
-        
-        $GLOBAL_STATE->{state} = 'success';
-        _notify_state_fn($event_bus, $c);
-      }, sub {
-        my ($json) = @_;
+            run_container()->then(
+                sub {
+                    _notify_state_fn($event_bus, 'wait-for-command');
+                    $event_log->open('>');
+                    # return type_string($container_tx, "\r");
+                }
+            )->catch(
+                sub {
+                    _notify_state_fn($event_bus, 'error-starting', {ctx => @_});
+                }
+            )->finally(
+                sub {
+                    $c->finish();
+                });
+        });
 
-        $GLOBAL_STATE->{state} = 'expired';
-        _notify_state_fn($event_bus, $c);
-      })
-      ->finally(sub {
-        $GLOBAL_STATE->{state} = 'started';
-        _notify_state_fn($event_bus, $c);
+    $self->routes->post(
+        '/run-command' => sub {
+            my ($c) = @_;
+            my $cmd = $c->param('foo');
 
-        $c->finish();
-      });
-  });
+            return $c->render(json => {result => 'fail-no-command'}) unless $cmd;
+            return $c->render(json => {result => 'fail-no-container'}) unless $container_tx;
 
-  $self->routes->post('/type' => sub {
-    my ($c) = @_;
-    my $string = $c->param('foo');
+            $c->inactivity_timeout(0);
+            _notify_state_fn($event_bus, 'running-command');
 
-    return $c->render(json => { result => 'fail-no-str' }) unless $string;
-    return $c->render(json => { result => 'fail-no-container' }) unless $container_tx;
+            send_command($container_tx, $cmd)->then(
+                sub {
+                    my ($json) = @_;
+                    _notify_state_fn($event_bus, 'success');
+                },
+                sub {
+                    my ($json) = @_;
+                    _notify_state_fn($event_bus, 'expired');
+                }
+            )->finally(
+                sub {
+                    _notify_state_fn($event_bus, 'started');
+                    $c->finish();
+                });
+        });
 
-    $c->inactivity_timeout(0);
-    $GLOBAL_STATE->{state} = 'typing';
+    $self->routes->post(
+        '/type' => sub {
+            my ($c) = @_;
+            my $string = $c->param('foo');
 
-    _notify_state_fn($event_bus, $c);
+            # return $c->render(json => {result => 'fail-no-str'}) unless $string;
+            return $c->render(json => {result => 'fail-no-container'}) unless $container_tx;
 
-    type_string($container_tx, $string)
-      ->then(sub {
-        my ($json) = @_;
+            $c->inactivity_timeout(0);
+            _notify_state_fn($event_bus, 'typing');
 
-        $GLOBAL_STATE->{state} = 'success';
-        _notify_state_fn($event_bus, $c, $json);
-      }, sub {
-        my ($json) = @_;
+            type_string($container_tx, $string)->then(
+                sub {
+                    my ($json) = @_;
+                    _notify_state_fn($event_bus, 'success', $json);
+                },
+                sub {
+                    my ($json) = @_;
+                    _notify_state_fn($event_bus, 'failed', $json);
+                }
+            )->finally(
+                sub {
+                    _notify_state_fn($event_bus, 'wait-for-command');
+                    $c->finish();
+                });
+        });
 
-        $GLOBAL_STATE->{state} = 'failed';
-        _notify_state_fn($event_bus, $c, $json);
-      })
-      ->finally(sub {
-        $GLOBAL_STATE->{state} = 'wait-for-command';
-        _notify_state_fn($event_bus, $c);
+    $self->routes->post(
+        '/stop' => sub {
+            my ($c) = @_;
+            $c->inactivity_timeout(300);
+            _notify_state_fn($event_bus, 'stopping');
 
-        $c->finish();
-      });
-  });
-
-  $self->routes->post('/stop' => sub {
-    my ($c) = @_;
-    $c->inactivity_timeout(300);
-    
-    $GLOBAL_STATE->{state} = 'stopping';
-    _notify_state_fn($event_bus, $c);
-
-    stop_container()
-      ->then(sub {
-        $GLOBAL_STATE->{state} = 'deleting';
-
-        _notify_state_fn($event_bus, $c);
-
-        return delete_container();
-      })->then(sub {
-        $GLOBAL_STATE->{state} = 'stopped';
-        _notify_state_fn($event_bus, $c);
-
-        $c->render(text => 'stopped container');
-      }, sub {
-        my ($reason) = @_;
-
-        $GLOBAL_STATE->{state} = 'error-deleting';
-        _notify_state_fn($event_bus, $c);
-
-      })->finally(sub {
-        $GLOBAL_STATE->{state} = 'idle';
-        _notify_state_fn($event_bus, $c);
-
-        $c->finish();
-      });
-  });
+            stop_container()->then(
+                sub {
+                    _notify_state_fn($event_bus, 'deleting');
+                    return delete_container();
+                }
+            )->then(
+                sub {
+                    _notify_state_fn($event_bus, 'stopped');
+                    $c->render(text => 'stopped container');
+                },
+                sub {
+                    my ($reason) = @_;
+                    _notify_state_fn($event_bus, 'error-deleting');
+                }
+            )->finally(
+                sub {
+                    _notify_state_fn($event_bus, 'idle');
+                    $c->finish();
+                });
+        });
 }
 
 1;
