@@ -9,16 +9,11 @@ use Mojo::File ();
 use Mojo::JSON ();
 use Mojo::EventEmitter ();
 use Mojo::Promise;
+use Mojo::Transaction::HTTPWithHijack;
 use POSIX ();
 
 my $event_bus = Mojo::EventEmitter->new();
 my $ws_clients = {};
-
-my %STREAM_NAMES = (
-    '0' => 'STDIN',
-    '1' => 'STDOUT',
-    '2' => 'STDERR',
-);
 
 my $base_url = Mojo::URL->new("http://127.0.0.1:8080/v1.43");
 my $ua = Mojo::UserAgent->new();
@@ -29,7 +24,7 @@ my $command_counter = 0;
 my $GLOBAL_STATE = {state => 'idle',};
 
 my $ob_capture = 0;
-my $output_buffer;
+my $output_buffer = '';
 open(my $output_buffer_writer, "+<", \$output_buffer) or die "Can't open memory file: $!";
 
 sub stop_container {
@@ -125,18 +120,28 @@ sub attach_container {
     my $url = $base_url->clone->path("containers/$cid/attach");
     $url->query->param('stream', 1)->param('stdout', 1)->param('stdin', 1)->param('logs', 1)->param('stderr', 1);
 
-    $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
+    # $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
+    $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade', Upgrade => 'tcp'});
+    # Decorate the transaction with HTTP Hijack implementation.
+    $container_tx = Mojo::Transaction::HTTPWithHijack->new($container_tx);
+    # Proceed as normal.
     $ua->inactivity_timeout(500);
 
     handle_container_connection($container_tx);
+    $container_tx->on(unexpected => sub{
+        say Mojo::Util::dumper('unexpected');
+    });
+
     $container_tx->res->content->once(
         read => sub {
+            say Mojo::Util::dumper('once');
             my ($content, $content_bytes) = @_;
             $promise->resolve($container_tx);
         });
 
     $container_tx->on(
         error => sub {
+            say Mojo::Util::dumper('error');
             say 'error in the container tx';
             $promise->reject('container-tx-error');
         });
@@ -144,6 +149,7 @@ sub attach_container {
     $ua->start(
         $container_tx,
         sub {
+            say Mojo::Util::dumper('closed');
             say 'SOCKET CLOSED';
             $container_tx = undef;
             delete $GLOBAL_STATE->{'cid'};
@@ -176,6 +182,8 @@ sub detect_stream_type {
 
 sub normalize_stream_output {
     my ($content_bytes) = @_;
+    # my %STREAM_NAMES = ( '0' => 'STDIN', '1' => 'STDOUT', '2' => 'STDERR', );
+
     my $output = "";
     # if it's a raw TTY, no processing is needed
     if (detect_stream_type($content_bytes) eq 'raw') {
@@ -186,9 +194,8 @@ sub normalize_stream_output {
     # - https://docs.podman.io/en/latest/_static/api.html#tag/containers/operation/ContainerAttachLibpod
     my @frames = unpack_framed_streams($content_bytes);
     while (@frames) {
-        my ($stream_type, $stream_size, $stream_content) = splice(@frames, 0, 3);
-        # say $STREAM_NAMES{$stream_type}, ": ", $stream_content;
-
+        my ($stream, $stream_size, $stream_content) = splice(@frames, 0, 3);
+        # say $STREAM_NAMES{$stream}, ": ", $stream_content;
         $output .= $stream_content;
     }
 
@@ -205,6 +212,7 @@ sub handle_container_connection {
     $tx->res->content->on(
         read => sub {
             my ($content, $content_bytes) = @_;
+            say Mojo::Util::dumper('read', $content_bytes);
 
             my $output = normalize_stream_output($content_bytes);
             return unless $output;
@@ -287,7 +295,7 @@ sub run_container {
         sub {
             my ($reason) = @_;
             # say 'finishing! rejected', Mojo::Util::dumper($reason);
-            $promise->reject('error-running');
+            $promise->reject(@_);
             return;
         });
 
