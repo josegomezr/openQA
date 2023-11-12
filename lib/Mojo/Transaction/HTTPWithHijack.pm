@@ -97,8 +97,19 @@ sub client_read {
   return undef unless $res->parse($chunk)->is_finished;
 
   # ~~ Custom Code ~~
-  # Hijack (send chunk) when applicable.
-  return $res->content->emit(read => $chunk) if _is_a_hijack_response($res);
+  # Hijack (keep the connection open) when applicable.
+  if (_is_a_hijack_response($res)){
+    # the first chunk received is just headers. We don't do anything with them
+    # besides detection, so: Dropping it...
+    $chunk = '' unless $res->{hijacked};
+
+    # Mark the request
+    $res->{hijacked} = 1;
+    # Send the data
+    $res->content->emit(read => $chunk);
+    # Stop here, wait for more
+    return undef;
+  }
   # ~/ Custom Code ~~
 
   # Unexpected 1xx response
