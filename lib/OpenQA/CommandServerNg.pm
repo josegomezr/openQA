@@ -4,12 +4,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 package OpenQA::CommandServerNg;
-use Mojo::Base 'Mojolicious', -signatures;
+use Mojo::Base 'Mojolicious', 'Mojo::EventEmitter', -signatures;
 use Mojo::File ();
 use Mojo::JSON ();
 use Mojo::EventEmitter ();
-use Mojo::Promise;
-use Mojo::Transaction::HTTPWithHijack;
+use Mojo::Promise ();
+use Mojo::Transaction::HTTPWithHijack ();
 use POSIX ();
 
 my $event_bus = Mojo::EventEmitter->new();
@@ -20,7 +20,6 @@ my $ua = Mojo::UserAgent->new();
 my $container_tx;
 
 my $command_counter = 0;
-
 my $GLOBAL_STATE = {state => 'idle',};
 
 my $ob_capture = 0;
@@ -89,7 +88,7 @@ sub create_container {
         StdinOnce => Mojo::JSON->true,
         ConsoleSize => [24, 80],
         Tty => $is_a_tty ? Mojo::JSON->true : Mojo::JSON->false,
-        Env => ["PS1=# "],
+        # Env => ["PS1=# "],
         HostConfig => {
             AutoRemove => Mojo::JSON->true,
         },
@@ -455,6 +454,8 @@ sub startup {
 
     $self->hook(before_dispatch => sub ($c) { _configure_current_request($c) });
 
+    $self->emit('event');
+
     $event_bus->on(
         'feed_update',
         sub {
@@ -608,6 +609,11 @@ sub startup {
                     $c->finish();
                 });
         });
+
+    # Some controllers are shared between openQA micro services
+    my $r = $self->routes->namespaces(['OpenQA::CommandServerNg::Controller']);
+
+    $self->routes->post('/rpc')->to('RPC#process');
 }
 
 1;

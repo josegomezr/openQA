@@ -20,6 +20,8 @@ use OpenQA::Utils qw(prjdir);
 use Mojo::File;
 use Fcntl ();
 
+use OpenQA::WorkerNg::Engine::Podman ();
+
 use constant {
     OS_AUTOINST_LOG => 'os-autoinst.txt',
     MAX_LIVELOG_CHUNK => 10_000,
@@ -54,6 +56,10 @@ has client => sub {
     );
 };
 
+has engine => sub {
+    my $self = shift;
+    return OpenQA::WorkerNg::Engine::Podman->new();
+};
 
 has command_server => sub {
     # TODO: make this a socket on the JOB folder.
@@ -71,17 +77,6 @@ has job_os_autoinst_file => undef;
 has worker_id => undef;
 has current_job => undef;
 has websocket_connection => undef;
-
-sub engine_start_command_server {
-    my ($self, $socket_path) = @_;
-    say "listening on socket: $socket_path";
-    $self->command_server->start();
-}
-
-sub engine_stop_command_server {
-    my $self = shift;
-    $self->command_server->stop();
-}
 
 sub new {
     my ($class, @attrs) = @_;
@@ -280,7 +275,7 @@ sub job_accept {
             $self->logger->info("job $job_id has been accepted");
 
             $self->job_post_status();
-            $self->engine_start();
+            $self->start_job();
         });
 }
 
@@ -350,29 +345,34 @@ sub _sync_worker_status {
         });
 }
 
-sub engine_start {
+# start working on job
+sub start_job {
     my ($self) = @_;
     my $job_id = $self->current_job->{id};
-    my $instance_number = $self->instance_number;
 
     # notify openqa we started working
     $self->emit(status_change => OpenQA::WorkerNg::Constants::WS_STATUS_WORKING);
-
     my $logger = $self->logger->context('worker-subprocess');
 
     $logger->info("---- [parent] START OF WORK ----");
-
-
+    my $instance_number = $self->instance_number;
     my $workdir = prjdir() . "/pool/$instance_number/JOB-$job_id";
 
     my $path = Mojo::File::path($workdir)->make_path;
-
     $self->job_pool_dir($path);
 
     my $autoinst_log_file = $path->child(OS_AUTOINST_LOG);
-
     $self->job_os_autoinst_file($autoinst_log_file);
-    $self->engine_start_command_server($workdir . "/control.sock");
+
+    $self->engine->start({
+        work_dir => $workdir
+    })->then(sub {
+        my ($engine) = @_;
+
+        say 'Engine started & container booted';
+    });
+
+    return;
 
     my $subprocess = Mojo::IOLoop->subprocess->run(
         sub {
@@ -381,9 +381,7 @@ sub engine_start {
             $logger->info("---- [child] START OF WORK ----");
 
             # Mimic some work
-            map { $subprocess->progress("First: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-            map { $subprocess->progress("Second: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-            map { $subprocess->progress("Third: log line: $_\n") and sleep 10; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
+            map { $subprocess->progress("First: log line: $_\n") and sleep 5; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
 
             $logger->info("---- [child] END OF WORK ----");
         },
@@ -392,7 +390,7 @@ sub engine_start {
             my $pid = $subprocess->pid;
 
             $logger->info("---- [parent] END OF WORK ----");
-            $self->engine_stop_command_server();
+            $self->engine->stop();
 
             $self->emit(
                 status_change => OpenQA::WorkerNg::Constants::WS_STATUS_STOPPING,
