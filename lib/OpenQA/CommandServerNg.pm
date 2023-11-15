@@ -7,6 +7,7 @@ package OpenQA::CommandServerNg;
 use Mojo::Base 'Mojolicious', 'Mojo::EventEmitter', -signatures;
 use Mojo::File ();
 use Mojo::JSON ();
+use Data::Dumper qw(Dumper);
 use Mojo::EventEmitter ();
 use Mojo::Promise ();
 use Mojo::Transaction::HTTPWithHijack ();
@@ -26,7 +27,6 @@ has logger => sub {
 my $command_counter = 0;
 my $GLOBAL_STATE = {state => 'idle',};
 my $event_log = Mojo::File->new('command-server-event-log.json');
-my $ob_capture = 0;
 my $output_buffer = '';
 open(my $output_buffer_writer, "+<", \$output_buffer) or die "Can't open memory file: $!";
 
@@ -220,7 +220,8 @@ sub handle_container_connection {
             my $output = normalize_stream_output($content_bytes);
             return unless $output;
 
-            print $output_buffer_writer $output if $ob_capture;
+            local $| = 1;
+            print $output_buffer_writer $output;
 
             $event_bus->emit(
                 'feed_update',
@@ -325,40 +326,30 @@ sub wait_for_needle {
     my $timer;
     my $recurring;
 
-    $self->start_capture();
+    $current_mark = qr/$current_mark/;
 
     $timer = Mojo::IOLoop->timer(
         10 => sub {
-            $promise->reject("command_expired: $current_mark");
-            
+            $promise->reject("timeout: $current_mark", $output_buffer);
+
             Mojo::IOLoop->remove($timer) if $timer;
             Mojo::IOLoop->remove($recurring) if $recurring;
         });
 
     $recurring = Mojo::IOLoop->recurring(1 => sub {
+        return unless $output_buffer;
+
         my $found = ($output_buffer =~ $current_mark);
         # clear output buffer
         $output_buffer = '';
         return unless $found;
 
-        $self->stop_capture();
-
-        $promise->resolve(@{^CAPTURE});
+        $promise->resolve($&, @{^CAPTURE});
         Mojo::IOLoop->remove($timer) if $timer;
         Mojo::IOLoop->remove($recurring) if $recurring;
     });
 
     return $promise;
-}
-
-sub start_capture {
-    $ob_capture = 1;
-    return Mojo::Promise->resolve();
-}
-
-sub stop_capture {
-    $ob_capture = 0;
-    return Mojo::Promise->resolve();
 }
 
 sub send_command {
@@ -379,7 +370,6 @@ sub send_command {
 
     $self->type_string("$cmd; echo $end_mark\n")->then(
         sub {
-            $self->start_capture();
             _notify_state_fn($event_bus, 'wait-for-marker');
             return $self->wait_for_needle($end_mark_regex);
     }, sub {
@@ -393,7 +383,7 @@ sub send_command {
                 exit_code => $exit_status
             });
 
-            $promise->resolve($exit_status);
+            $promise->resolve(@_);
             return;
         }, sub {
             # Forcefully close container socket
@@ -408,7 +398,6 @@ sub send_command {
             $promise->reject(@_);
             return;
         })->finally(sub {
-            $self->stop_capture();
         });
 
     return $promise;
@@ -443,8 +432,8 @@ sub type_string {
 
     my @pieces = ($string);
     # type one char at a time.
-    # my $wait = 1;
-    # @pieces = unpack("(a${wait})*", $string) if $wait;
+    my $wait = 0;
+    @pieces = unpack("(a${wait})*", $string) if $wait;
 
     Mojo::Promise
         ->map({concurrency => 1}, sub { return $self->type_char($_) }, @pieces)
