@@ -56,7 +56,11 @@ sub start_command_server {
 sub stop_command_server {
     my $self = shift;
     $self->logger->info("stopping command server");
-    $self->command_server_daemon->stop();
+    $self->command_server->stop_container()->then(sub {
+    	return $self->command_server->delete_container();
+    })->catch(sub {})->finally(sub {
+    	$self->command_server_daemon->stop();
+    });
 }
 
 sub start {

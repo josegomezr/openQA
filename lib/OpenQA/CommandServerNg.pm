@@ -17,11 +17,15 @@ my $ws_clients = {};
 
 my $base_url = Mojo::URL->new("http://127.0.0.1:8080/v1.43");
 my $ua = Mojo::UserAgent->new();
-my $container_tx;
+
+has container_tx => undef;
+has logger => sub {
+    return Mojo::Log->new(color => 1)->context('command-server');
+};
 
 my $command_counter = 0;
 my $GLOBAL_STATE = {state => 'idle',};
-
+my $event_log = Mojo::File->new('command-server-event-log.json');
 my $ob_capture = 0;
 my $output_buffer = '';
 open(my $output_buffer_writer, "+<", \$output_buffer) or die "Can't open memory file: $!";
@@ -88,7 +92,7 @@ sub create_container {
         StdinOnce => Mojo::JSON->true,
         ConsoleSize => [24, 80],
         Tty => $is_a_tty ? Mojo::JSON->true : Mojo::JSON->false,
-        # Env => ["PS1=# "],
+        Env => ["PS1=# "],
         HostConfig => {
             AutoRemove => Mojo::JSON->true,
         },
@@ -113,14 +117,14 @@ sub create_container {
 }
 
 sub attach_container {
-    my ($cid) = @_;
+    my ($self, $cid) = @_;
     my $promise = Mojo::Promise->new();
 
     my $url = $base_url->clone->path("containers/$cid/attach");
     $url->query->param('stream', 1)->param('stdout', 1)->param('stdin', 1)->param('logs', 1)->param('stderr', 1);
 
-    # $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
-    $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade', Upgrade => 'tcp'});
+    # my $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade'});
+    my $container_tx = $ua->build_tx(POST => $url => {Host => 'docker', Connection => 'Upgrade', Upgrade => 'tcp'});
     # Decorate the transaction with HTTP Hijack implementation.
     $container_tx = Mojo::Transaction::HTTPWithHijack->new($container_tx);
     # Proceed as normal.
@@ -133,14 +137,14 @@ sub attach_container {
 
     $container_tx->res->content->once(
         read => sub {
-            say Mojo::Util::dumper('once');
+            # say Mojo::Util::dumper('once');
             my ($content, $content_bytes) = @_;
             $promise->resolve($container_tx);
         });
 
     $container_tx->on(
         error => sub {
-            say Mojo::Util::dumper('error');
+            # say Mojo::Util::dumper('error');
             say 'error in the container tx';
             $promise->reject('container-tx-error');
         });
@@ -148,12 +152,12 @@ sub attach_container {
     $ua->start(
         $container_tx,
         sub {
-            say Mojo::Util::dumper('closed');
+            # say Mojo::Util::dumper('closed');
             say 'SOCKET CLOSED';
-            $container_tx = undef;
+            $self->container_tx(undef);
             delete $GLOBAL_STATE->{'cid'};
         });
-
+    $self->container_tx($container_tx);
     return $promise;
 }
 
@@ -211,7 +215,7 @@ sub handle_container_connection {
     $tx->res->content->on(
         read => sub {
             my ($content, $content_bytes) = @_;
-            say Mojo::Util::dumper('read', $content_bytes);
+            # say Mojo::Util::dumper('read', $content_bytes);
 
             my $output = normalize_stream_output($content_bytes);
             return unless $output;
@@ -230,6 +234,7 @@ sub handle_container_connection {
 sub start_container {
     my ($cid) = @_;
     my $promise = Mojo::Promise->new();
+    $event_log->open('>');
     my $url = $base_url->clone->path("containers/$cid/start");
     return $ua->post(
         $url,
@@ -258,6 +263,7 @@ sub resize_container {
 }
 
 sub run_container {
+    my ($self) = @_;
     my $promise = Mojo::Promise->new();
 
     # say 'create-container';
@@ -268,7 +274,7 @@ sub run_container {
 
             # TODO: find a cleaner way for this chain.
             $GLOBAL_STATE->{'cid'} = $cid;
-            return attach_container($cid);
+            return $self->attach_container($cid);
         })    # now after attaching
       ->then(
         sub {
@@ -314,24 +320,28 @@ sub unpack_framed_streams {
 }
 
 sub wait_for_needle {
-    my ($current_mark) = @_;
+    my ($self, $current_mark) = @_;
     my $promise = Mojo::Promise->new();
     my $timer;
     my $recurring;
 
+    $self->start_capture();
+
     $timer = Mojo::IOLoop->timer(
-        8 => sub {
-            $promise->reject('command_expired');
+        10 => sub {
+            $promise->reject("command_expired: $current_mark");
             
             Mojo::IOLoop->remove($timer) if $timer;
             Mojo::IOLoop->remove($recurring) if $recurring;
         });
 
-    $recurring = Mojo::IOLoop->recurring(3 => sub {
-        my $found = $output_buffer =~ $current_mark;
+    $recurring = Mojo::IOLoop->recurring(1 => sub {
+        my $found = ($output_buffer =~ $current_mark);
         # clear output buffer
         $output_buffer = '';
         return unless $found;
+
+        $self->stop_capture();
 
         $promise->resolve(@{^CAPTURE});
         Mojo::IOLoop->remove($timer) if $timer;
@@ -341,23 +351,40 @@ sub wait_for_needle {
     return $promise;
 }
 
+sub start_capture {
+    $ob_capture = 1;
+    return Mojo::Promise->resolve();
+}
+
+sub stop_capture {
+    $ob_capture = 0;
+    return Mojo::Promise->resolve();
+}
+
 sub send_command {
+    my ($self, $cmd) = @_;
     my $promise = Mojo::Promise->new();
+
+    if(!$cmd){
+        return $promise->reject(@_);
+    }
+
     ++$command_counter;
-    my ($tx, $cmd) = @_;
     # Watch out here, markers are unquoted strings in sh to make it easy for
     # perl regexes.
-    my $start_mark = "%${command_counter}_START_MARKER_${command_counter}%";
-    my $end_mark = "%${command_counter}_END_MARKER_\${?}_${command_counter}%";
+    my $end_mark = "%_${command_counter}_END_\$?_${command_counter}_%";
     
     # ignore the mark after an echo, TTY's will reply everything you type in it.
-    my $end_mark_regex = qr{(?<![echo ])%(?:\d+)_END_MARKER_(?<exit_code>\d+)_(?:\d+)%};
+    my $end_mark_regex = qr{(?<![; echo ])%_${command_counter}_END_(?<exit_code>\d+)_${command_counter}_%};
 
-    $ob_capture = 1;
-    type_string($tx, "echo $start_mark; $cmd;echo $end_mark;\n")->then(
+    $self->type_string("$cmd; echo $end_mark\n")->then(
         sub {
+            $self->start_capture();
             _notify_state_fn($event_bus, 'wait-for-marker');
-            return wait_for_needle($end_mark_regex);
+            return $self->wait_for_needle($end_mark_regex);
+    }, sub {
+        $promise->reject(@_);
+        return;
     })->then(
         sub {
             my ($exit_status) = @_;
@@ -366,47 +393,65 @@ sub send_command {
                 exit_code => $exit_status
             });
 
-            $promise->resolve();
+            $promise->resolve($exit_status);
             return;
         }, sub {
             # Forcefully close container socket
             # $tx->closed or $tx->completed will wait until timeout, but:
             # $tx->req->finish(); or $tx->res->finish(); break my mitmproxy...
-            $tx->res->content->unsubscribe('read');
-            $tx->closed();
-            $tx->completed();
+            if ($self->container_tx) {
+                $self->container_tx->res->content->unsubscribe('read');
+                $self->container_tx->closed();
+                $self->container_tx->completed();
+            }
 
             $promise->reject(@_);
             return;
         })->finally(sub {
-            $ob_capture = 0;
+            $self->stop_capture();
         });
+
+    return $promise;
+}
+
+sub type_char {
+    my ($self, $char) = @_;
+    my $promise = Mojo::Promise->new();
+
+    if (!$self->container_tx) {
+        return $promise->reject('no-container-conn');
+    }
+    my $tx = $self->container_tx;
+
+    # $tx->res->content->once(read => sub {
+    #     ;
+    # });
+
+    $tx->req->content->write($char, sub { $promise->resolve() });
+    $tx->resume;
 
     return $promise;
 }
 
 sub type_string {
     my $promise = Mojo::Promise->new();
-    my ($tx, $string) = @_;
+    my ($self, $string) = @_;
 
-    # print Mojo::Util::dumper($string);
-
-    if (!$tx) {
-        $promise->reject('no-container-conn');
+    if (!$self->container_tx) {
+        return $promise->reject('no-container-conn');
     }
 
-    $tx->req->content->write(
-        $string,
-        sub {
-            $promise->resolve();
-        });
+    my @pieces = ($string);
+    # type one char at a time.
+    # my $wait = 1;
+    # @pieces = unpack("(a${wait})*", $string) if $wait;
 
-    # Flush
-    $tx->resume;
+    Mojo::Promise
+        ->map({concurrency => 1}, sub { return $self->type_char($_) }, @pieces)
+        ->then(sub{ $promise->resolve() }, sub{ $promise->reject() });
+
     return $promise;
 }
-
-my $event_log = Mojo::File->new('command-server-event-log.json');
 
 sub load_event_log {
     my ($tx) = @_;
@@ -440,6 +485,7 @@ sub _configure_current_request {
 
     # websockets doesn't like this shennanigans...
     return if $conn->tx->is_websocket;
+    return if $conn->req->url->path =~ qr{/rpc};
 
     $GLOBAL_STATE->{connection} = $conn;
 
@@ -462,7 +508,7 @@ sub startup {
             my ($self, $data) = @_;
 
             my $msg = Mojo::JSON::encode_json($data);
-            say "$msg\n";
+            # say "$msg\n";
 
             # Write logs into the file
             {
@@ -486,13 +532,13 @@ sub startup {
         '/feed' => sub {
             my ($tx) = @_;
             $tx->inactivity_timeout(300);
-            say 'ws: connected';
+            # say 'ws: connected';
             $ws_clients->{$tx} = $tx;
 
             $tx->on(
                 message => sub ($self, $msg) {
                     if ($msg eq 'load-event-log') {
-                        say 'sending event log';
+                        # say 'sending event log';
                         return load_event_log($self);
                     }
 
@@ -513,10 +559,9 @@ sub startup {
 
             _notify_state_fn($event_bus, 'starting');
 
-            run_container()->then(
+            $self->run_container()->then(
                 sub {
                     _notify_state_fn($event_bus, 'wait-for-command');
-                    $event_log->open('>');
                     # return type_string($container_tx, "\r");
                 }
             )->catch(
@@ -535,12 +580,12 @@ sub startup {
             my $cmd = $c->param('foo');
 
             return $c->render(json => {result => 'fail-no-command'}) unless $cmd;
-            return $c->render(json => {result => 'fail-no-container'}) unless $container_tx;
+            return $c->render(json => {result => 'fail-no-container'}) unless $self->container_tx;
 
             $c->inactivity_timeout(0);
             _notify_state_fn($event_bus, 'running-command');
 
-            send_command($container_tx, $cmd)->then(
+            $self->send_command($cmd)->then(
                 sub {
                     my ($json) = @_;
                     _notify_state_fn($event_bus, 'success');
@@ -562,12 +607,12 @@ sub startup {
             my $string = $c->param('foo');
 
             # return $c->render(json => {result => 'fail-no-str'}) unless $string;
-            return $c->render(json => {result => 'fail-no-container'}) unless $container_tx;
+            return $c->render(json => {result => 'fail-no-container'}) unless $self->container_tx;
 
             $c->inactivity_timeout(0);
             _notify_state_fn($event_bus, 'typing');
 
-            type_string($container_tx, $string)->then(
+            $self->type_string($string)->then(
                 sub {
                     my ($json) = @_;
                     _notify_state_fn($event_bus, 'success', $json);

@@ -76,29 +76,70 @@ sub cast_params($params) {
 sub process {
 	my ($self) = @_;
 
-	# print "============\n";
+	# print "===== XML BODY =====\n";
 	# print $self->req->body;
-	# print "============\n";
+	# print "===== XML BODY =====\n";
 
 	my $method_call = Mojo::DOM->new($self->req->body)->at('methodCall');
 
 	my $fn_name = $method_call->at('methodName')->text;
 	my $params = $method_call->at('params')->children;
-	
+	$self->inactivity_timeout(300);
+
 	my @args = cast_params($params);
-
-	print "Calling $fn_name with ". Mojo::JSON::encode_json(\@args) ."\n";
-
-	sleep 3;
-
-    $self->render(text => '<?xml version="1.0"?>
+	my $result;
+	
+	if (!$self->app->can($fn_name)) {
+		$self->render(text => '<?xml version="1.0"?>
 <methodResponse>
-    <params>
-        <param>
-            <value><string>'.$fn_name.'(' .Dumper([@args]). ')</string></value>
-            </param>
-        </params>
-    </methodResponse>', status => 200);
+	<fault>
+    	<value>
+        	<struct>
+	            <member>
+	                <name>faultCode</name>
+	                <value><int>4</int></value>
+	            </member>
+	            <member>
+	                <name>faultString</name>
+	                <value><string>'.$fn_name.' does not exist </string></value>
+                </member>
+            </struct>
+        </value>
+    </fault>
+</methodResponse>', status => 200);
+	}
+
+	$self->app->logger("Calling '$fn_name' with ". Mojo::JSON::encode_json(\@args));
+	$self->app->$fn_name(@args)->then(sub {
+		$self->render(text => '<?xml version="1.0"?>
+<methodResponse>
+	<params>
+	    <param>
+	        <value>
+	        	<string>'.$fn_name.' => (' . Mojo::JSON::encode_json(\@_) . ')</string>
+	        </value>
+        </param>
+    </params>
+</methodResponse>', status => 200);
+	})->catch(sub {
+		$self->render(text => '<?xml version="1.0"?>
+<methodResponse>
+	<fault>
+    	<value>
+        	<struct>
+	            <member>
+	                <name>faultCode</name>
+	                <value><int>4</int></value>
+	            </member>
+	            <member>
+	                <name>faultString</name>
+	                <value><string>FAILED: '.$fn_name.' => (' . Mojo::Util::xml_escape(Mojo::JSON::encode_json(\@_)) . ')</string></value>
+                </member>
+            </struct>
+        </value>
+    </fault>
+</methodResponse>', status => 200);
+	});
 }
 
 1;

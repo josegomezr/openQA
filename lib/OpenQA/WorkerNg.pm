@@ -370,26 +370,32 @@ sub start_job {
         my ($engine) = @_;
 
         say 'Engine started & container booted';
-    });
-
-    return;
+    })->wait;
 
     my $subprocess = Mojo::IOLoop->subprocess->run(
         sub {
             my ($subprocess) = @_;
-            my $pid = $subprocess->pid;
             $logger->info("---- [child] START OF WORK ----");
-
-            # Mimic some work
-            map { $subprocess->progress("First: log line: $_\n") and sleep 5; } (1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
-
-            $logger->info("---- [child] END OF WORK ----");
+            my $pid = fork();
+            if (!$pid) {
+                die "cannot fork: $!" unless defined $pid;
+                # open(STDIN,  "<&=STDIN")   || die "can't dup client to stdin";
+                # open(STDOUT, ">&=STDOUT") or die $!;
+                sleep 1;
+                $ENV{CONTROL_SOCKET_URL} = "http://127.51.41.45:9999/rpc";
+                my @test_runner = ('python3', 'rpc_client.py');
+                my $test_file = 'sample-test.py';
+                exec @test_runner, $test_file;
+            }
+            waitpid $pid, 0;
         },
         sub {
             my ($subprocess, $err, @results) = @_;
             my $pid = $subprocess->pid;
 
             $logger->info("---- [parent] END OF WORK ----");
+            $logger->info(Data::Dumper::Dumper($err, @results));
+
             $self->engine->stop();
 
             $self->emit(
