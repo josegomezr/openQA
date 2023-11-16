@@ -55,9 +55,9 @@ Implicit: HTTP 200 + Content-Type:
 Explicit: HTTP 101 Upgrade
   
   HTTP/1.1 101 UPGRADED
-  Content-Type: tcp
+  Content-Type: application/vnd.docker.raw-stream
   Connection: Upgrade
-  Upgrade: application/vnd.docker.raw-stream
+  Upgrade: tcp
 
 =cut
 
@@ -66,8 +66,8 @@ sub _is_a_hijack_response {
 
   # Test the explicit path:
   if ($res->is_info) {
-    my $is_docker_stream = ($res->headers->upgrade // '-') eq 'application/vnd.docker.raw-stream';
-    my $is_tcp = ($res->headers->content_type // '-') eq 'tcp';
+    my $is_docker_stream = ($res->headers->content_type // '-') eq 'application/vnd.docker.raw-stream';
+    my $is_tcp = ($res->headers->upgrade // '-') eq 'tcp';
     
     return $is_tcp && $is_docker_stream;
   }
